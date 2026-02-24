@@ -8,7 +8,6 @@ ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
 COPY ["Directory.Build.props", "./"]
 COPY ["Directory.Packages.props", "./"]
-COPY ["global.json", "./"]
 COPY ["Pulsy.EKV.Node/Pulsy.EKV.Node.csproj", "Pulsy.EKV.Node/"]
 COPY ["proto/ekv.proto", "proto/"]
 RUN dotnet restore "Pulsy.EKV.Node/Pulsy.EKV.Node.csproj"
