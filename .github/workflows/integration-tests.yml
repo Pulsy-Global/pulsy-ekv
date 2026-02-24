@@ -1,0 +1,13 @@
+name: Integration Tests
+on: [push, pull_request]
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet test tests/Pulsy.EKV.IntegrationTests/ --logger "console;verbosity=normal"
