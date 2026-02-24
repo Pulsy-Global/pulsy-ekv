@@ -1,0 +1,18 @@
+apiVersion: 1
+
+providers:
+  - name: EKV
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards/local
+      foldersFromFilesStructure: false
+
+  - name: Remote
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /tmp/dashboards
+      foldersFromFilesStructure: false

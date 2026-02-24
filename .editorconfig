@@ -1,0 +1,81 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{xml,csproj,props,targets,sln}]
+indent_style = space
+indent_size = 2
+
+[*.{json,yaml,yml}]
+indent_style = space
+indent_size = 2
+
+[*.cs]
+indent_style = space
+indent_size = 4
+
+# File-scoped namespaces (enforce)
+csharp_style_namespace_declarations = file_scoped:error
+
+# Require braces (enforce)
+csharp_prefer_braces = true:error
+
+# var preferences
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = true:suggestion
+
+# ---- StyleCop: disabled rules ----
+
+# SA1101: Prefix local calls with this - noisy, modern C# convention
+dotnet_diagnostic.SA1101.severity = none
+
+# SA1200: Using directives must be placed correctly - conflicts with file-scoped namespaces
+dotnet_diagnostic.SA1200.severity = none
+
+# SA1309: Field names must not begin with underscore - conflicts with _fieldName convention
+dotnet_diagnostic.SA1309.severity = none
+
+# SA1600: Elements should be documented - no mandatory XML docs
+dotnet_diagnostic.SA1600.severity = none
+
+# SA1601: Partial elements should be documented
+dotnet_diagnostic.SA1601.severity = none
+
+# SA1602: Enumeration items should be documented
+dotnet_diagnostic.SA1602.severity = none
+
+# SA1611: Element parameters should be documented
+dotnet_diagnostic.SA1611.severity = none
+
+# SA1615: Element return value should be documented
+dotnet_diagnostic.SA1615.severity = none
+
+# SA1618: Generic type parameters should be documented
+dotnet_diagnostic.SA1618.severity = none
+
+# SA1629: Documentation text should end with a period
+dotnet_diagnostic.SA1629.severity = none
+
+# SA1633: File should have header - no file headers
+dotnet_diagnostic.SA1633.severity = none
+
+# SA1634: File header should show copyright text
+dotnet_diagnostic.SA1634.severity = none
+
+# SA1652: Enable XML documentation output - deprecated
+dotnet_diagnostic.SA1652.severity = none
+
+# SA1413: Use trailing comma in multi-line initializers - style preference
+dotnet_diagnostic.SA1413.severity = none
+
+# SA0001: XML comment analysis disabled - we don't generate XML docs
+dotnet_diagnostic.SA0001.severity = none
+
+# SA1501: Statement should not be on a single line - conflicts with expression-bodied members
+dotnet_diagnostic.SA1501.severity = none
+

@@ -1,0 +1,154 @@
+syntax = "proto3";
+
+option csharp_namespace = "Pulsy.EKV.Grpc";
+
+package ekv;
+
+service EkvStore {
+  rpc Get (GetRequest) returns (GetResponse);
+  rpc Put (PutRequest) returns (PutResponse);
+  rpc Delete (DeleteRequest) returns (DeleteResponse);
+  rpc Batch (BatchRequest) returns (BatchResponse);
+  rpc MultiGet (MultiGetRequest) returns (MultiGetResponse);
+  rpc Scan (ScanRequest) returns (stream ScanEntry);
+}
+
+// --- Get ---
+
+message GetRequest {
+  string namespace = 1;
+  string key = 2;
+}
+
+message GetResponse {
+  bool found = 1;
+  bytes value = 2;
+}
+
+// --- Put ---
+
+message PutRequest {
+  string namespace = 1;
+  string key = 2;
+  bytes value = 3;
+  optional int64 ttl_ms = 4;
+}
+
+message PutResponse {}
+
+// --- Delete ---
+
+message DeleteRequest {
+  string namespace = 1;
+  string key = 2;
+}
+
+message DeleteResponse {}
+
+// --- Batch ---
+
+enum BatchOpType {
+  PUT = 0;
+  DELETE = 1;
+}
+
+message BatchOperation {
+  BatchOpType type = 1;
+  string key = 2;
+  bytes value = 3;
+  optional int64 ttl_ms = 4;
+}
+
+message BatchRequest {
+  string namespace = 1;
+  repeated BatchOperation ops = 2;
+}
+
+message BatchResponse {}
+
+// --- MultiGet ---
+
+message MultiGetRequest {
+  string namespace = 1;
+  repeated string keys = 2;
+}
+
+message MultiGetEntry {
+  string key = 1;
+  bytes value = 2;
+}
+
+message MultiGetResponse {
+  repeated MultiGetEntry entries = 1;
+}
+
+// --- Scan (server streaming) ---
+
+message ScanRequest {
+  string namespace = 1;
+  optional string prefix = 2;
+  int32 limit = 5; // 0 = unlimited
+  optional string cursor = 6; // exclusive start key for pagination
+}
+
+message ScanEntry {
+  string key = 1;
+  bytes value = 2;
+}
+
+// ===== Admin =====
+
+service EkvAdmin {
+  rpc CreateNamespace (CreateNamespaceRequest) returns (CreateNamespaceResponse);
+  rpc GetNamespace (GetNamespaceRequest) returns (GetNamespaceResponse);
+  rpc ListNamespaces (ListNamespacesRequest) returns (ListNamespacesResponse);
+  rpc UpdateNamespace (UpdateNamespaceRequest) returns (UpdateNamespaceResponse);
+  rpc DeleteNamespace (DeleteNamespaceRequest) returns (DeleteNamespaceResponse);
+  rpc HibernateNamespace (HibernateNamespaceRequest) returns (HibernateNamespaceResponse);
+}
+
+message CreateNamespaceRequest {
+  string name = 1;
+  string backend = 2;
+}
+
+message CreateNamespaceResponse {}
+
+message GetNamespaceRequest {
+  string name = 1;
+}
+
+message GetNamespaceResponse {
+  string name = 1;
+  string backend = 2;
+}
+
+message ListNamespacesRequest {}
+
+message NamespaceEntry {
+  string name = 1;
+  string backend = 2;
+}
+
+message ListNamespacesResponse {
+  repeated NamespaceEntry namespaces = 1;
+}
+
+message UpdateNamespaceRequest {
+  string name = 1;
+  string backend = 2;
+}
+
+message UpdateNamespaceResponse {}
+
+message DeleteNamespaceRequest {
+  string name = 1;
+}
+
+message DeleteNamespaceResponse {}
+
+message HibernateNamespaceRequest {
+  string name = 1;
+}
+
+message HibernateNamespaceResponse {}

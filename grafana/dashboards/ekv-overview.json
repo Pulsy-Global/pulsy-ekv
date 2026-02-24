@@ -1,0 +1,359 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "Cluster Health",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "title": "Nodes",
+      "description": "Active nodes reporting metrics",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0",
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      },
+      "options": { "graphMode": "none", "textMode": "value" },
+      "targets": [
+        { "expr": "count(ekv_pool_open{job=\"ekv\"})", "instant": true }
+      ]
+    },
+    {
+      "title": "Total Namespaces",
+      "description": "Sum of owned namespaces across all nodes",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "noValue": "0" }
+      },
+      "options": { "graphMode": "none", "textMode": "value" },
+      "targets": [
+        { "expr": "sum(ekv_namespaces_owned{job=\"ekv\"})", "instant": true }
+      ]
+    },
+    {
+      "title": "Request Rate",
+      "description": "Cluster-wide gRPC request rate",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "noValue": "0" }
+      },
+      "options": { "graphMode": "area", "textMode": "value" },
+      "targets": [
+        { "expr": "sum(rate(http_server_request_duration_seconds_count{job=\"ekv\"}[1m]))" }
+      ]
+    },
+    {
+      "title": "Error Rate",
+      "description": "Cluster-wide 4xx/5xx rate",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "0",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "options": { "graphMode": "area", "textMode": "value" },
+      "targets": [
+        { "expr": "sum(rate(http_server_request_duration_seconds_count{job=\"ekv\",http_response_status_code=~\"[45]..\"}[1m])) or vector(0)" }
+      ]
+    },
+    {
+      "title": "Lease Losses",
+      "description": "Total lease losses in the last 5m - non-zero means failover activity",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      },
+      "options": { "graphMode": "none", "textMode": "value" },
+      "targets": [
+        { "expr": "sum(increase(ekv_lease_lost_total{job=\"ekv\"}[5m])) or vector(0)", "instant": true }
+      ]
+    },
+    {
+      "title": "Pool Evictions",
+      "description": "Total evictions in the last 5m - high values indicate pool pressure",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 20 }
+            ]
+          }
+        }
+      },
+      "options": { "graphMode": "none", "textMode": "value" },
+      "targets": [
+        { "expr": "sum(increase(ekv_pool_evictions_total{job=\"ekv\"}[5m])) or vector(0)", "instant": true }
+      ]
+    },
+    {
+      "title": "Nodes",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false
+    },
+    {
+      "title": "Node List",
+      "description": "Click a row to see node details",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "title": "Node Details",
+              "url": "/d/ekv-node-overview?var-instance=${__data.fields.Node}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Namespaces" },
+            "properties": [{ "id": "unit", "value": "short" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Open DBs" },
+            "properties": [{ "id": "unit", "value": "short" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Req/s" },
+            "properties": [{ "id": "unit", "value": "reqps" }, { "id": "decimals", "value": 1 }, { "id": "noValue", "value": "-" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "p95 Latency" },
+            "properties": [{ "id": "unit", "value": "s" }, { "id": "decimals", "value": 3 }, { "id": "noValue", "value": "-" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Disk Free" },
+            "properties": [{ "id": "unit", "value": "bytes" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Memory" },
+            "properties": [{ "id": "unit", "value": "bytes" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Evictions (5m)" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "thresholds", "value": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 10 }] } },
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "basic" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Lease Losses (5m)" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "thresholds", "value": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 3 }] } },
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "basic" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "Namespaces", "desc": true }]
+      },
+      "transformations": [
+        { "id": "merge" },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true,
+              "Time 5": true, "Time 6": true, "Time 7": true, "Time 8": true
+            },
+            "renameByName": {
+              "instance": "Node",
+              "Value #Namespaces": "Namespaces",
+              "Value #Open": "Open DBs",
+              "Value #Reqps": "Req/s",
+              "Value #P95": "p95 Latency",
+              "Value #Memory": "Memory",
+              "Value #DiskFree": "Disk Free",
+              "Value #Evictions": "Evictions (5m)",
+              "Value #Losses": "Lease Losses (5m)"
+            },
+            "indexByName": {
+              "instance": 0,
+              "Value #Namespaces": 1,
+              "Value #Open": 2,
+              "Value #DiskFree": 3,
+              "Value #Reqps": 4,
+              "Value #P95": 5,
+              "Value #Memory": 6,
+              "Value #Evictions": 7,
+              "Value #Losses": 8
+            }
+          }
+        }
+      ],
+      "targets": [
+        { "expr": "sum by (instance) (ekv_namespaces_owned{job=\"ekv\"})", "instant": true, "format": "table", "refId": "Namespaces" },
+        { "expr": "sum by (instance) (ekv_pool_open{job=\"ekv\"})", "instant": true, "format": "table", "refId": "Open" },
+        { "expr": "sum by (instance) (rate(http_server_request_duration_seconds_count{job=\"ekv\"}[5m]))", "instant": true, "format": "table", "refId": "Reqps" },
+        { "expr": "histogram_quantile(0.95, sum by (instance, le) (rate(http_server_request_duration_seconds_bucket{job=\"ekv\"}[5m])))", "instant": true, "format": "table", "refId": "P95" },
+        { "expr": "sum by (instance) (ekv_disk_free_bytes{job=\"ekv\"})", "instant": true, "format": "table", "refId": "DiskFree" },
+        { "expr": "sum by (instance) (slatedb_total_mem_size_bytes{job=\"ekv\"})", "instant": true, "format": "table", "refId": "Memory" },
+        { "expr": "sum by (instance) (increase(ekv_pool_evictions_total{job=\"ekv\"}[5m]))", "instant": true, "format": "table", "refId": "Evictions" },
+        { "expr": "sum by (instance) (increase(ekv_lease_lost_total{job=\"ekv\"}[5m]))", "instant": true, "format": "table", "refId": "Losses" }
+      ]
+    },
+    {
+      "title": "Traffic",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "collapsed": false
+    },
+    {
+      "title": "Request Rate by Method",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_count{job=\"ekv\"}[1m]))",
+          "legendFormat": "{{http_route}}"
+        }
+      ]
+    },
+    {
+      "title": "Latency p50 / p95 / p99",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 }
+        }
+      },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"ekv\"}[5m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"ekv\"}[5m])))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"ekv\"}[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "title": "Storage",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "collapsed": false
+    },
+    {
+      "title": "Namespace Distribution",
+      "description": "Owned namespaces per node over time - shows rebalancing",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        { "expr": "ekv_namespaces_owned{job=\"ekv\"}", "legendFormat": "{{instance}}" }
+      ]
+    },
+    {
+      "title": "SlateDB Ops Rate",
+      "description": "Aggregate get/write/scan rate across all nodes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      },
+      "targets": [
+        { "expr": "sum(rate(slatedb_get_requests{job=\"ekv\"}[1m]))", "legendFormat": "get" },
+        { "expr": "sum(rate(slatedb_write_ops{job=\"ekv\"}[1m]))", "legendFormat": "write" },
+        { "expr": "sum(rate(slatedb_scan_requests{job=\"ekv\"}[1m]))", "legendFormat": "scan" }
+      ]
+    },
+    {
+      "title": "Memory & WAL",
+      "description": "Aggregate SlateDB memory usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "fillOpacity": 15 }
+        }
+      },
+      "targets": [
+        { "expr": "sum(slatedb_total_mem_size_bytes{job=\"ekv\"})", "legendFormat": "total mem" },
+        { "expr": "sum(slatedb_wal_buffer_estimated_bytes{job=\"ekv\"})", "legendFormat": "WAL buffer" }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["ekv"],
+  "templating": { "list": [] },
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "EKV Cluster Overview",
+  "uid": "ekv-overview",
+  "version": 2
+}
