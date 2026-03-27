@@ -4,6 +4,8 @@ Clustered key-value store on [SlateDB](https://github.com/slatedb/slatedb) with 
 
 Supports namespaced key-value spaces, cross-node request forwarding, batch writes and OpenTelemetry observability.
 
+> ⚠️ **Warning:** This software is in BETA. It may still contain bugs and unexpected behavior. Use caution with production data and ensure you have backups.
+
 ## Quick Start
 
 ```bash
