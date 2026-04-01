@@ -52,10 +52,7 @@ public sealed class EkvAdminService : EkvAdmin.EkvAdminBase
         var existing = await _registry.GetAsync(ns, ct);
         if (existing != null)
         {
-            throw new RpcException(
-                new Status(
-                    StatusCode.AlreadyExists,
-                    $"Namespace '{ns}' already exists"));
+            return new CreateNamespaceResponse();
         }
 
         var config = new NamespaceConfig { Name = ns, Backend = backend };
