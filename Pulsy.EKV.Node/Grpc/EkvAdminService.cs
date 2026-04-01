@@ -44,24 +44,7 @@ public sealed class EkvAdminService : EkvAdmin.EkvAdminBase
             throw new RpcException(new Status(StatusCode.InvalidArgument, "name is required"));
         }
 
-        if (_clusterConfig.ClusterMode && string.IsNullOrWhiteSpace(request.Backend))
-        {
-            throw new RpcException(
-                new Status(
-                    StatusCode.InvalidArgument,
-                    "backend is required in cluster mode"));
-        }
-
-        var backend = string.IsNullOrWhiteSpace(request.Backend) ? "local" : request.Backend;
-        if (!_backends.Backends.TryGetValue(backend, out var backendsBackend))
-        {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, $"unknown backend: {backend}"));
-        }
-
-        if (_clusterConfig.ClusterMode && backendsBackend.Type == BackendType.Local)
-        {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "local backend is not allowed in cluster mode"));
-        }
+        var backend = ResolveBackend(request.Backend);
 
         var ns = request.Name;
         var ct = context.CancellationToken;
@@ -126,15 +109,7 @@ public sealed class EkvAdminService : EkvAdmin.EkvAdminBase
             throw new RpcException(new Status(StatusCode.InvalidArgument, "name is required"));
         }
 
-        if (!_backends.Backends.TryGetValue(request.Backend, out var backend))
-        {
-            throw new RpcException(new Status(StatusCode.NotFound, $"backend '{request.Backend}' not found"));
-        }
-
-        if (_clusterConfig.ClusterMode && backend.Type == BackendType.Local)
-        {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "local backend is not allowed in cluster mode"));
-        }
+        var backendName = ResolveBackend(request.Backend);
 
         var existing = await _registry.GetAsync(request.Name, context.CancellationToken);
         if (existing == null)
@@ -149,15 +124,34 @@ public sealed class EkvAdminService : EkvAdmin.EkvAdminBase
         // NOTE: There is a brief window between CloseAsync and the next GetOrOpenAsync
         // where a concurrent request may fail to acquire a handle. This is acceptable
         // as the namespace will be re-opened on the next request.
-        var config = new NamespaceConfig { Name = request.Name, Backend = request.Backend };
+        var config = new NamespaceConfig { Name = request.Name, Backend = backendName };
         await _registry.UpdateAsync(config, context.CancellationToken);
 
-        if (existing.Backend != request.Backend)
+        if (existing.Backend != backendName)
         {
-            await _pool.GetOrOpenAsync(request.Name, request.Backend);
+            await _pool.GetOrOpenAsync(request.Name, backendName);
         }
 
         return new UpdateNamespaceResponse();
+    }
+
+    private string ResolveBackend(string? requested)
+    {
+        var name = string.IsNullOrWhiteSpace(requested) || requested == "default"
+            ? _clusterConfig.DefaultBackend ?? "local"
+            : requested;
+
+        if (!_backends.Backends.TryGetValue(name, out var config))
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, $"unknown backend: {name}"));
+        }
+
+        if (_clusterConfig.ClusterMode && config.Type == BackendType.Local)
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "local backend is not allowed in cluster mode"));
+        }
+
+        return name;
     }
 
     public override async Task<DeleteNamespaceResponse> DeleteNamespace(

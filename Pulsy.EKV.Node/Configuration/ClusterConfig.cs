@@ -4,6 +4,8 @@ public sealed class ClusterConfig
 {
     public bool ClusterMode { get; set; }
 
+    public string? DefaultBackend { get; set; }
+
     public int LeaseTtlSeconds { get; set; } = 30;
 
     public int LeaseRenewSeconds { get; set; } = 20;

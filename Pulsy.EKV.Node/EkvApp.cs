@@ -28,6 +28,8 @@ public static class EkvApp
         builder.Services.Configure<LimitsConfig>(builder.Configuration.GetSection("Limits"));
         builder.Services.Configure<DiagnosticsConfig>(builder.Configuration.GetSection("Diagnostics"));
         builder.Services.Configure<BackendsConfig>(builder.Configuration);
+        builder.Services.PostConfigure<BackendsConfig>(c =>
+            c.Backends.TryAdd("local", new BackendConfig { Type = BackendType.Local }));
 
         builder.Services.AddSingleton<DatabasePool>();
         builder.Services.AddSingleton<EkvMetrics>();
