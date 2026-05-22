@@ -82,7 +82,12 @@ public sealed class ClusterCoordinator : BackgroundService
 
                 _logger.LogInformation("Received assignment for {Namespace}", request.Namespace);
 
-                var store = await _namespaceCoordinator.AcceptAssignmentAsync(request.Namespace, request.Backend, ct);
+                var store = await _namespaceCoordinator.AcceptAssignmentAsync(
+                    request.Namespace,
+                    request.Backend,
+                    request.ExpectedOwner,
+                    ct);
+
                 await msg.ReplyAsync(
                     JsonSerializer.Serialize(new AssignReply { Success = store != null }),
                     cancellationToken: ct);

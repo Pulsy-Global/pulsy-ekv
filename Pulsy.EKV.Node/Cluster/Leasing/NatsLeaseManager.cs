@@ -49,6 +49,64 @@ public sealed class NatsLeaseManager : ILeaseManager
         }
     }
 
+    public async Task<bool> TryAcquireFromOwnerAsync(
+        string namespaceName,
+        string? expectedOwner,
+        CancellationToken ct = default)
+    {
+        var store = await GetStoreAsync(ct);
+        var key = KeyPrefix + namespaceName;
+        var entry = await store.TryGetEntryAsync<string>(key, cancellationToken: ct);
+        if (!entry.Success)
+        {
+            try
+            {
+                var rev = await store.CreateAsync(key, _nodeId, cancellationToken: ct);
+                _revisions[namespaceName] = rev;
+                _logger.LogInformation("Lease acquired for {Namespace} (rev={Rev})", namespaceName, rev);
+                return true;
+            }
+            catch (NatsKVCreateException)
+            {
+                return false;
+            }
+        }
+
+        var currentOwner = entry.Value.Value;
+        if (currentOwner == _nodeId)
+        {
+            _revisions[namespaceName] = entry.Value.Revision;
+            return true;
+        }
+
+        if (expectedOwner == null || currentOwner != expectedOwner)
+        {
+            return false;
+        }
+
+        try
+        {
+            var newRev = await store.UpdateAsync(
+                key,
+                _nodeId,
+                entry.Value.Revision,
+                cancellationToken: ct);
+
+            _revisions[namespaceName] = newRev;
+
+            _logger.LogInformation(
+                "Lease transferred for {Namespace} from {Owner} (rev={Rev})",
+                namespaceName,
+                expectedOwner,
+                newRev);
+            return true;
+        }
+        catch (NatsKVWrongLastRevisionException)
+        {
+            return false;
+        }
+    }
+
     public async Task<bool> TryRenewAsync(string namespaceName, CancellationToken ct = default)
     {
         if (!_revisions.TryGetValue(namespaceName, out var expectedRev))

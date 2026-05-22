@@ -5,4 +5,6 @@ public sealed record AssignRequest
     public required string Namespace { get; init; }
 
     public required string Backend { get; init; }
+
+    public string? ExpectedOwner { get; init; }
 }

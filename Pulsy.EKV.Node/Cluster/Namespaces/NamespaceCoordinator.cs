@@ -236,9 +236,16 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
         }
     }
 
+    internal Task<SlateDbStore?> AcceptAssignmentAsync(
+        string namespaceName,
+        string backend,
+        CancellationToken ct = default)
+        => AcceptAssignmentAsync(namespaceName, backend, expectedOwner: null, ct);
+
     internal async Task<SlateDbStore?> AcceptAssignmentAsync(
         string namespaceName,
         string backend,
+        string? expectedOwner,
         CancellationToken ct = default)
     {
         if (_stopping)
@@ -258,7 +265,7 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
                 }
             }
 
-            if (!await LeaseManager.TryAcquireAsync(namespaceName, ct))
+            if (!await LeaseManager.TryAcquireFromOwnerAsync(namespaceName, expectedOwner, ct))
             {
                 _logger.LogWarning("Failed to acquire lease for assigned {Namespace}", namespaceName);
                 return null;
@@ -376,7 +383,7 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
                     {
                         _metrics.RecordLeaseLost();
                         _logger.LogWarning("Lost lease for {Namespace}, releasing resources", ns);
-                        await ReleaseNamespaceAsync(ns);
+                        await _pool.CloseAsync(ns);
                     }
                 }
                 catch (Exception ex)
@@ -384,6 +391,8 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
                     _logger.LogError(ex, "Error renewing lease for {Namespace}", ns);
                 }
             }
+
+            await ClaimUnclaimedNamespacesAsync();
         }
         catch (Exception ex)
         {

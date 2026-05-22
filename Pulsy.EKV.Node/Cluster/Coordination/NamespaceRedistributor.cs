@@ -45,7 +45,7 @@ public sealed class NamespaceRedistributor
         await _lock.WaitAsync(ct);
         try
         {
-            var namespaces = await _leaseManager.GetNamespacesByOwnerAsync(deadNodeId, ct);
+            var namespaces = await GetRedistributionCandidatesAsync(deadNodeId, ct);
             if (namespaces.Count == 0)
             {
                 _logger.LogInformation("No namespaces to redistribute for node {Node}", deadNodeId);
@@ -59,8 +59,10 @@ public sealed class NamespaceRedistributor
 
             var reassigned = 0;
 
-            foreach (var ns in namespaces)
+            foreach (var candidate in namespaces)
             {
+                var ns = candidate.Namespace;
+
                 try
                 {
                     var config = await _registry.GetAsync(ns, ct);
@@ -79,7 +81,11 @@ public sealed class NamespaceRedistributor
 
                     if (targetNode == _nodeId)
                     {
-                        var store = await _namespaceCoordinator.AcceptAssignmentAsync(ns, config.Backend, ct);
+                        var store = await _namespaceCoordinator.AcceptAssignmentAsync(
+                            ns,
+                            config.Backend,
+                            candidate.ExpectedOwner,
+                            ct);
                         if (store != null)
                         {
                             reassigned++;
@@ -88,7 +94,13 @@ public sealed class NamespaceRedistributor
                         continue;
                     }
 
-                    var request = new AssignRequest { Namespace = ns, Backend = config.Backend };
+                    var request = new AssignRequest
+                    {
+                        Namespace = ns,
+                        Backend = config.Backend,
+                        ExpectedOwner = candidate.ExpectedOwner,
+                    };
+
                     var reply = await _nats.RequestAsync<string, string>(
                         NatsSubjects.AssignNode(targetNode),
                         JsonSerializer.Serialize(request),
@@ -128,4 +140,34 @@ public sealed class NamespaceRedistributor
             _lock.Release();
         }
     }
+
+    private async Task<IReadOnlyList<RedistributionCandidate>> GetRedistributionCandidatesAsync(
+        string deadNodeId,
+        CancellationToken ct)
+    {
+        var candidates = new Dictionary<string, RedistributionCandidate>(StringComparer.Ordinal);
+
+        foreach (var ns in await _leaseManager.GetNamespacesByOwnerAsync(deadNodeId, ct))
+        {
+            candidates[ns] = new RedistributionCandidate(ns, deadNodeId);
+        }
+
+        var namespaces = await _registry.ListAsync(ct);
+        foreach (var ns in namespaces)
+        {
+            var owner = await _leaseManager.GetOwnerAsync(ns.Name, ct);
+            if (owner == null)
+            {
+                candidates[ns.Name] = new RedistributionCandidate(ns.Name, null);
+            }
+            else if (owner == deadNodeId)
+            {
+                candidates[ns.Name] = new RedistributionCandidate(ns.Name, deadNodeId);
+            }
+        }
+
+        return candidates.Values.ToList();
+    }
+
+    private sealed record RedistributionCandidate(string Namespace, string? ExpectedOwner);
 }

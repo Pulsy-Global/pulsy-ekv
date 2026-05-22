@@ -6,6 +6,8 @@ public interface ILeaseManager
 
     Task<bool> TryAcquireAsync(string namespaceName, CancellationToken ct = default);
 
+    Task<bool> TryAcquireFromOwnerAsync(string namespaceName, string? expectedOwner, CancellationToken ct = default);
+
     Task<bool> TryRenewAsync(string namespaceName, CancellationToken ct = default);
 
     Task<bool> ReleaseAsync(string namespaceName, CancellationToken ct = default);

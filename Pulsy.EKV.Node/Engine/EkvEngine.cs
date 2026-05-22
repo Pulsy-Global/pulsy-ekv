@@ -204,6 +204,11 @@ public sealed class EkvEngine
 
     private void ValidateValueSize(byte[] value)
     {
+        if (value is null || value.Length == 0)
+        {
+            throw new ArgumentException("value must be non-empty");
+        }
+
         if (value.Length > _limits.MaxValueBytes)
         {
             throw new ArgumentException("Value exceeds limit size");
