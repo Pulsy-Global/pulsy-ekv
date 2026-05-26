@@ -80,8 +80,15 @@ services:
       Node__DataPath: /data
       Node__GrpcEndpoint: http://ekv-node-1:8080
       Cluster__ClusterMode: "true"
+      Cluster__DefaultBackend: s3
       Nats__Url: nats://nats:4222
+      Backends__s3__Type: S3
+      Backends__s3__Bucket: ekv
+      Backends__s3__Region: us-east-1
       Backends__s3__Endpoint: http://minio:9000
+      Backends__s3__AccessKeyId: minioadmin
+      Backends__s3__SecretAccessKey: minioadmin
+      Backends__s3__AllowHttp: "true"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     ports:
       - "8081:8080"
@@ -103,8 +110,15 @@ services:
       Node__DataPath: /data
       Node__GrpcEndpoint: http://ekv-node-2:8080
       Cluster__ClusterMode: "true"
+      Cluster__DefaultBackend: s3
       Nats__Url: nats://nats:4222
+      Backends__s3__Type: S3
+      Backends__s3__Bucket: ekv
+      Backends__s3__Region: us-east-1
       Backends__s3__Endpoint: http://minio:9000
+      Backends__s3__AccessKeyId: minioadmin
+      Backends__s3__SecretAccessKey: minioadmin
+      Backends__s3__AllowHttp: "true"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     ports:
       - "8082:8080"

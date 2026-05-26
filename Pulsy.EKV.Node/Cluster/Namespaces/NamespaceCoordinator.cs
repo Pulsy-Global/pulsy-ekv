@@ -1,9 +1,5 @@
-using System.Text.Json;
 using Microsoft.Extensions.Options;
-using NATS.Client.Core;
 using Pulsy.EKV.Node.Cluster.Leasing;
-using Pulsy.EKV.Node.Cluster.Messages;
-using Pulsy.EKV.Node.Cluster.Placement;
 using Pulsy.EKV.Node.Cluster.Registry;
 using Pulsy.EKV.Node.Configuration;
 using Pulsy.EKV.Node.Diagnostics;
@@ -21,12 +17,10 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
     private readonly EkvMetrics _metrics;
     private readonly ILogger<NamespaceCoordinator> _logger;
 
-    // Cluster-only dependencies (null in single-node mode, accessed via throwing properties)
     private readonly ILeaseManager? _leaseManager;
-    private readonly IPlacementStrategy? _placement;
-    private readonly INatsConnection? _nats;
 
-    private readonly SemaphoreSlim _claimLock = new(1, 1);
+    private readonly SemaphoreSlim _namespaceLock = new(1, 1);
+    private readonly NamespaceLifecycleTracker _lifecycle = new();
     private Timer? _renewTimer;
     private volatile bool _healthy = true;
     private volatile bool _stopping;
@@ -38,9 +32,7 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
         IOptions<NodeConfig> nodeConfig,
         IOptions<ClusterConfig> clusterConfig,
         ILogger<NamespaceCoordinator> logger,
-        ILeaseManager? leaseManager = null,
-        IPlacementStrategy? placement = null,
-        INatsConnection? nats = null)
+        ILeaseManager? leaseManager = null)
     {
         _registry = registry;
         _pool = pool;
@@ -49,8 +41,6 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
         _clusterConfig = clusterConfig.Value;
         _logger = logger;
         _leaseManager = leaseManager;
-        _placement = placement;
-        _nats = nats;
     }
 
     public bool IsHealthy => _healthy;
@@ -58,21 +48,12 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
     private ILeaseManager LeaseManager => _leaseManager
         ?? throw new InvalidOperationException("ILeaseManager is required in cluster mode");
 
-    private IPlacementStrategy Placement => _placement
-        ?? throw new InvalidOperationException("IPlacementStrategy is required in cluster mode");
-
-    private INatsConnection Nats => _nats
-        ?? throw new InvalidOperationException("INatsConnection is required in cluster mode");
-
     public async Task StartAsync(CancellationToken ct)
     {
         await _registry.InitAsync(ct);
 
         if (_clusterConfig.ClusterMode)
         {
-            await Placement.InitAsync(ct);
-            await ClaimUnclaimedNamespacesAsync(ct);
-
             var renewInterval = TimeSpan.FromSeconds(_clusterConfig.LeaseRenewSeconds);
             _renewTimer = new Timer(_ => _ = RenewLeasesAsync(), null, renewInterval, Timeout.InfiniteTimeSpan);
         }
@@ -89,20 +70,9 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
         {
             _renewTimer?.Change(Timeout.Infinite, Timeout.Infinite);
 
-            var drained = await TryDrainViaLeaderAsync(ct);
-            if (!drained)
+            foreach (var ns in LeaseManager.OwnedNamespaces.ToList())
             {
-                foreach (var ns in LeaseManager.OwnedNamespaces.ToList())
-                {
-                    await ReleaseNamespaceAsync(ns);
-                }
-            }
-            else
-            {
-                foreach (var ns in LeaseManager.OwnedNamespaces.ToList())
-                {
-                    await _pool.CloseAsync(ns);
-                }
+                await ReleaseNamespaceAsync(ns);
             }
         }
 
@@ -112,18 +82,27 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
 
     public async Task<StoreHandle?> GetStoreAsync(string namespaceName, CancellationToken ct = default)
     {
+        if (_lifecycle.IsReleasing(namespaceName))
+        {
+            return null;
+        }
+
         var handle = _pool.Acquire(namespaceName);
         if (handle != null)
         {
-            return handle;
-        }
-
-        if (_clusterConfig.ClusterMode)
-        {
-            if (!LeaseManager.IsOwnedLocally(namespaceName))
+            if (_lifecycle.IsReleasing(namespaceName))
             {
+                handle.Dispose();
                 return null;
             }
+
+            if (!_clusterConfig.ClusterMode || LeaseManager.IsOwnedLocally(namespaceName))
+            {
+                return handle;
+            }
+
+            handle.Dispose();
+            await _pool.CloseAsync(namespaceName);
         }
 
         var config = await _registry.GetAsync(namespaceName, ct);
@@ -132,8 +111,16 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
             return null;
         }
 
-        await _pool.GetOrOpenAsync(namespaceName, config.Backend);
-        return _pool.Acquire(namespaceName);
+        await _namespaceLock.WaitAsync(ct);
+        try
+        {
+            var store = await OpenNamespaceUnderLockAsync(namespaceName, config.Backend, ct);
+            return store == null ? null : _pool.Acquire(namespaceName);
+        }
+        finally
+        {
+            _namespaceLock.Release();
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -143,109 +130,12 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
             await _renewTimer.DisposeAsync();
         }
 
-        _claimLock.Dispose();
+        _namespaceLock.Dispose();
     }
 
-    internal async Task<SlateDbStore?> TryClaimAsync(string namespaceName, CancellationToken ct = default)
-    {
-        if (_stopping)
-        {
-            return null;
-        }
-
-        if (!_clusterConfig.ClusterMode)
-        {
-            var config = await _registry.GetAsync(namespaceName, ct);
-            if (config == null)
-            {
-                return null;
-            }
-
-            var store = await _pool.GetOrOpenAsync(namespaceName, config.Backend);
-            _logger.LogInformation("Claimed namespace {Namespace}", namespaceName);
-            return store;
-        }
-
-        string backend;
-
-        await _claimLock.WaitAsync(ct);
-        try
-        {
-            if (LeaseManager.IsOwnedLocally(namespaceName))
-            {
-                var existingConfig = await _registry.GetAsync(namespaceName, ct);
-                if (existingConfig == null)
-                {
-                    return null;
-                }
-
-                backend = existingConfig.Backend;
-            }
-            else
-            {
-                var targetNode = await Placement.SelectNodeAsync(ct);
-                if (targetNode != _nodeConfig.Id)
-                {
-                    _logger.LogDebug("Placement selected {Node} for {Namespace}, not us", targetNode, namespaceName);
-                    return null;
-                }
-
-                var config = await _registry.GetAsync(namespaceName, ct);
-                if (config == null)
-                {
-                    _logger.LogWarning("Namespace {Namespace} not found in registry", namespaceName);
-                    return null;
-                }
-
-                if (!await LeaseManager.TryAcquireAsync(namespaceName, ct))
-                {
-                    _logger.LogDebug("Failed to acquire lease for {Namespace} (already claimed)", namespaceName);
-                    return null;
-                }
-
-                backend = config.Backend;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to claim namespace {Namespace}", namespaceName);
-            return null;
-        }
-        finally
-        {
-            _claimLock.Release();
-        }
-
-        try
-        {
-            var store = await _pool.GetOrOpenAsync(namespaceName, backend);
-
-            _metrics.RecordLeaseAcquired();
-            _logger.LogInformation("Claimed namespace {Namespace}", namespaceName);
-
-            return store;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to set up namespace {Namespace} after lease acquire, releasing", namespaceName);
-
-            await _pool.CloseAsync(namespaceName);
-            await LeaseManager.ReleaseAsync(namespaceName, ct);
-
-            return null;
-        }
-    }
-
-    internal Task<SlateDbStore?> AcceptAssignmentAsync(
+    internal async Task<SlateDbStore?> EnsureNamespaceOpenAsync(
         string namespaceName,
         string backend,
-        CancellationToken ct = default)
-        => AcceptAssignmentAsync(namespaceName, backend, expectedOwner: null, ct);
-
-    internal async Task<SlateDbStore?> AcceptAssignmentAsync(
-        string namespaceName,
-        string backend,
-        string? expectedOwner,
         CancellationToken ct = default)
     {
         if (_stopping)
@@ -253,146 +143,146 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
             return null;
         }
 
-        await _claimLock.WaitAsync(ct);
+        await _namespaceLock.WaitAsync(ct);
         try
         {
-            if (LeaseManager.IsOwnedLocally(namespaceName))
-            {
-                var store = _pool.TryGet(namespaceName);
-                if (store != null)
-                {
-                    return store;
-                }
-            }
-
-            if (!await LeaseManager.TryAcquireFromOwnerAsync(namespaceName, expectedOwner, ct))
-            {
-                _logger.LogWarning("Failed to acquire lease for assigned {Namespace}", namespaceName);
-                return null;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to accept assignment for {Namespace}", namespaceName);
-            return null;
+            return await OpenNamespaceUnderLockAsync(namespaceName, backend, ct);
         }
         finally
         {
-            _claimLock.Release();
-        }
-
-        try
-        {
-            var store = await _pool.GetOrOpenAsync(namespaceName, backend);
-            _metrics.RecordLeaseAcquired();
-            _logger.LogInformation("Accepted assignment for {Namespace}", namespaceName);
-
-            return store;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to open DB for assigned {Namespace}, releasing", namespaceName);
-            await _pool.CloseAsync(namespaceName);
-
-            await LeaseManager.ReleaseAsync(namespaceName, ct);
-
-            return null;
+            _namespaceLock.Release();
         }
     }
 
     internal async Task ReleaseNamespaceAsync(string namespaceName)
     {
-        await _pool.CloseAsync(namespaceName);
-
-        if (_clusterConfig.ClusterMode)
-        {
-            await LeaseManager.ReleaseAsync(namespaceName);
-        }
-
-        _metrics.RecordLeaseReleased();
-        _logger.LogInformation("Released namespace {Namespace}", namespaceName);
-    }
-
-    private async Task ClaimUnclaimedNamespacesAsync(CancellationToken ct = default)
-    {
-        var namespaces = await _registry.ListAsync(ct);
-        foreach (var ns in namespaces)
-        {
-            if (LeaseManager.IsOwnedLocally(ns.Name))
-            {
-                continue;
-            }
-
-            var owner = await LeaseManager.GetOwnerAsync(ns.Name, ct);
-            if (owner != null)
-            {
-                continue;
-            }
-
-            await TryClaimAsync(ns.Name, ct);
-        }
-    }
-
-    private async Task<bool> TryDrainViaLeaderAsync(CancellationToken ct)
-    {
+        IDisposable releasing;
+        await _namespaceLock.WaitAsync();
         try
         {
-            var timeout = TimeSpan.FromSeconds(_clusterConfig.DrainTimeoutSeconds);
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(timeout);
+            releasing = _lifecycle.EnterReleasing(namespaceName);
+        }
+        finally
+        {
+            _namespaceLock.Release();
+        }
 
-            var request = new DrainRequest { NodeId = _nodeConfig.Id };
-            var reply = await Nats.RequestAsync<string, string>(
-                NatsSubjects.ClusterDrain,
-                JsonSerializer.Serialize(request),
-                cancellationToken: cts.Token);
+        try
+        {
+            await _pool.CloseAsync(namespaceName);
 
-            var response = JsonSerializer.Deserialize<DrainReply>(reply.Data!);
-            if (response?.Success == true)
+            if (_clusterConfig.ClusterMode)
             {
-                _logger.LogInformation(
-                    "Drain complete: {Count} namespaces reassigned",
-                    response.NamespacesReassigned);
-
-                return true;
+                await LeaseManager.ReleaseAsync(namespaceName);
             }
 
-            _logger.LogWarning("Drain request failed, falling back to direct release");
-            return false;
+            _metrics.RecordLeaseReleased();
+            _logger.LogInformation("Released namespace {Namespace}", namespaceName);
+        }
+        finally
+        {
+            releasing.Dispose();
+        }
+    }
+
+    internal async Task CloseLocalNamespaceAsync(string namespaceName)
+    {
+        using var closing = _lifecycle.EnterClosing(namespaceName);
+        await _pool.CloseAsync(namespaceName);
+    }
+
+    private async Task<SlateDbStore?> OpenNamespaceUnderLockAsync(
+        string namespaceName,
+        string backend,
+        CancellationToken ct)
+    {
+        if (_stopping || _lifecycle.IsReleasing(namespaceName))
+        {
+            return null;
+        }
+
+        if (!await AcquireLeaseIfNeededAsync(namespaceName, ct))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var opening = _lifecycle.EnterOpening(namespaceName);
+            var store = await _pool.GetOrOpenAsync(namespaceName, backend);
+            _logger.LogInformation("Opened namespace {Namespace}", namespaceName);
+
+            return store;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Drain via leader failed, falling back to direct release");
+            _logger.LogError(ex, "Failed to open DB for namespace {Namespace}, releasing", namespaceName);
+            await _pool.CloseAsync(namespaceName);
+
+            if (_clusterConfig.ClusterMode)
+            {
+                await LeaseManager.ReleaseAsync(namespaceName, ct);
+            }
+
+            return null;
+        }
+    }
+
+    private async Task<bool> AcquireLeaseIfNeededAsync(string namespaceName, CancellationToken ct)
+    {
+        if (!_clusterConfig.ClusterMode || LeaseManager.IsOwnedLocally(namespaceName))
+        {
+            return true;
+        }
+
+        if (!await LeaseManager.TryAcquireAsync(namespaceName, ct))
+        {
+            _logger.LogDebug("Failed to acquire lease for {Namespace} (already claimed)", namespaceName);
             return false;
         }
+
+        _metrics.RecordLeaseAcquired();
+        _logger.LogInformation("Lease acquired for namespace {Namespace}", namespaceName);
+        return true;
     }
 
     private async Task RenewLeasesAsync()
     {
         try
         {
+            var openNamespaces = _pool.ListOpenNamespaces()
+                .ToDictionary(e => e.Name, e => e.BackendName, StringComparer.Ordinal);
+
             foreach (var ns in LeaseManager.OwnedNamespaces.ToList())
             {
                 try
                 {
-                    if (await LeaseManager.TryRenewAsync(ns))
+                    if (_lifecycle.IsClosingOrReleasing(ns))
                     {
-                        _metrics.RecordLeaseRenewed();
+                        await RenewLeaseAsync(ns);
+                        continue;
                     }
-                    else
+
+                    if (!await ReconcileRegistryAsync(ns, openNamespaces))
                     {
-                        _metrics.RecordLeaseLost();
-                        _logger.LogWarning("Lost lease for {Namespace}, releasing resources", ns);
-                        await _pool.CloseAsync(ns);
+                        continue;
                     }
+
+                    if (!openNamespaces.ContainsKey(ns) && !_lifecycle.IsOpening(ns))
+                    {
+                        _metrics.RecordLeaseReleased();
+                        _logger.LogInformation("Releasing lease for closed namespace {Namespace}", ns);
+                        await LeaseManager.ReleaseAsync(ns);
+                        continue;
+                    }
+
+                    await RenewLeaseAsync(ns);
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Error renewing lease for {Namespace}", ns);
                 }
             }
-
-            await ClaimUnclaimedNamespacesAsync();
         }
         catch (Exception ex)
         {
@@ -403,5 +293,51 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
             var renewInterval = TimeSpan.FromSeconds(_clusterConfig.LeaseRenewSeconds);
             _renewTimer?.Change(renewInterval, Timeout.InfiniteTimeSpan);
         }
+    }
+
+    private async Task<bool> ReconcileRegistryAsync(
+        string namespaceName,
+        IReadOnlyDictionary<string, string> openNamespaces)
+    {
+        if (!openNamespaces.TryGetValue(namespaceName, out var backendName))
+        {
+            return true;
+        }
+
+        var config = await _registry.GetAsync(namespaceName);
+        if (config == null)
+        {
+            _logger.LogInformation(
+                "Namespace {Namespace} no longer exists in registry, releasing local lease",
+                namespaceName);
+            await ReleaseNamespaceAsync(namespaceName);
+            return false;
+        }
+
+        if (!string.Equals(config.Backend, backendName, StringComparison.Ordinal))
+        {
+            _logger.LogInformation(
+                "Namespace {Namespace} backend changed from {OldBackend} to {NewBackend}, releasing local lease",
+                namespaceName,
+                backendName,
+                config.Backend);
+            await ReleaseNamespaceAsync(namespaceName);
+            return false;
+        }
+
+        return true;
+    }
+
+    private async Task RenewLeaseAsync(string namespaceName)
+    {
+        if (await LeaseManager.TryRenewAsync(namespaceName))
+        {
+            _metrics.RecordLeaseRenewed();
+            return;
+        }
+
+        _metrics.RecordLeaseLost();
+        _logger.LogWarning("Lost lease for {Namespace}, releasing resources", namespaceName);
+        await _pool.CloseAsync(namespaceName);
     }
 }

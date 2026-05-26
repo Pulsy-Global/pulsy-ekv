@@ -97,6 +97,11 @@ public sealed class EkvNamespace : IEkvNamespace
         string? cursor = null,
         CancellationToken ct = default)
     {
+        if (limit <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit), limit, "limit must be positive");
+        }
+
         var req = new ScanRequest { Namespace = _ns, Prefix = prefix, Limit = limit + 1 };
         if (cursor != null)
         {

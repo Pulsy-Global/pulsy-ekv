@@ -5,6 +5,7 @@ using Pulsy.EKV.Node.Configuration;
 using Pulsy.EKV.Node.Configuration.Backends;
 using Pulsy.EKV.Node.Configuration.Pool;
 using Pulsy.EKV.Node.Diagnostics;
+using Pulsy.EKV.Node.Extensions;
 using Pulsy.EKV.Node.Grpc;
 using Pulsy.EKV.Node.Storage.DatabasePool;
 

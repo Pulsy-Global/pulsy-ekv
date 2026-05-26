@@ -97,7 +97,7 @@ public sealed class SlateDbMetricsCollector : IHostedService, IDisposable
     {
         try
         {
-            var entries = _pool.GetOpenEntries();
+            var entries = _pool.ListOpenStores();
             var aggregated = new Dictionary<string, long>();
 
             foreach (var (name, store) in entries)

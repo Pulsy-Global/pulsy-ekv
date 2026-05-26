@@ -5,6 +5,7 @@ using Pulsy.EKV.Node;
 using Pulsy.EKV.Node.Cluster.Namespaces;
 using Pulsy.EKV.Node.Cluster.Registry;
 using Pulsy.EKV.Node.Models;
+using Pulsy.EKV.Node.Storage.DatabasePool;
 
 namespace Pulsy.EKV.IntegrationTests.Infrastructure;
 
@@ -25,6 +26,8 @@ public sealed class EkvNodeInstance : IAsyncDisposable
 
     public IServiceProvider Services => _app.Services;
 
+    public int OpenNamespaceCount => Services.GetRequiredService<DatabasePool>().OpenCount;
+
     public static EkvNodeInstance Create(string nodeId, int port, string dataPath, string natsUrl)
     {
         var overrides = new Dictionary<string, string?>
@@ -42,16 +45,14 @@ public sealed class EkvNodeInstance : IAsyncDisposable
             ["Cluster:LeaseRenewSeconds"] = "3",
             ["Cluster:StatusTtlSeconds"] = "5",
             ["Cluster:StatusIntervalSeconds"] = "2",
-            ["Cluster:LeaderTtlSeconds"] = "5",
-            ["Cluster:LeaderRenewSeconds"] = "3",
-            ["Cluster:ClusterPollSeconds"] = "3",
-            ["Cluster:DrainTimeoutSeconds"] = "5",
 
             // NATS
             ["Nats:Url"] = natsUrl,
 
             // Backends (must provide a default backend)
             ["Backends:default:Type"] = "Local",
+            ["Backends:remote-test:Type"] = "S3",
+            ["Backends:remote-test:Bucket"] = "ekv-test",
 
             ["Pool:MaxOpen"] = "100",
             ["Pool:AwaitDurable"] = "true",
@@ -85,13 +86,15 @@ public sealed class EkvNodeInstance : IAsyncDisposable
 
         var config = new NamespaceConfig { Name = name, Backend = "default" };
         await registry.CreateAsync(config, ct);
-        await coordinator.AcceptAssignmentAsync(name, config.Backend, ct);
+        await coordinator.EnsureNamespaceOpenAsync(name, config.Backend, ct);
     }
 
-    public async Task ClaimNamespaceAsync(string name, CancellationToken ct = default)
+    public async Task CreateNamespaceRegistryEntryAsync(string name, CancellationToken ct = default)
     {
-        var coordinator = Services.GetRequiredService<NamespaceCoordinator>();
-        await coordinator.AcceptAssignmentAsync(name, "default", ct);
+        var registry = Services.GetRequiredService<INamespaceRegistry>();
+
+        var config = new NamespaceConfig { Name = name, Backend = "default" };
+        await registry.CreateAsync(config, ct);
     }
 
     public async ValueTask DisposeAsync()

@@ -1,4 +1,5 @@
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble AS base
+RUN mkdir -p /data && chown -R $APP_UID:$APP_UID /data
 USER $APP_UID
 WORKDIR /app
 EXPOSE 8080

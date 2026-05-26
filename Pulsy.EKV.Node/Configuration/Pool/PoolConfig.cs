@@ -6,7 +6,7 @@ public sealed class PoolConfig
 {
     public int MaxOpen { get; set; } = 100;
 
-    public int IdleTimeoutSeconds { get; set; } = 300;
+    public int IdleTimeoutSeconds { get; set; } = 1_800;
 
     public int EvictionIntervalSeconds { get; set; } = 30;
 
