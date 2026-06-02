@@ -42,5 +42,7 @@ internal static class NamespaceNames
         => ch is >= 'a' and <= 'z'
             or >= 'A' and <= 'Z'
             or >= '0' and <= '9'
+            or '.'
+            or '_'
             or '-';
 }
