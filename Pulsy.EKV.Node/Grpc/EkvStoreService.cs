@@ -205,9 +205,9 @@ public sealed class EkvStoreService : EkvStore.EkvStoreBase
 
     private static void ValidateNamespace(string namespaceName)
     {
-        if (string.IsNullOrWhiteSpace(namespaceName))
+        if (!NamespaceNames.IsValid(namespaceName))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "namespace is required"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, NamespaceNames.ValidationMessage));
         }
     }
 

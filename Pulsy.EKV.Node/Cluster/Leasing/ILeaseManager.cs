@@ -10,9 +10,7 @@ public interface ILeaseManager
 
     Task<bool> ReleaseAsync(string namespaceName, CancellationToken ct = default);
 
-    Task<string?> GetOwnerAsync(string namespaceName, CancellationToken ct = default);
-
-    Task<IReadOnlyList<string>> GetNamespacesByOwnerAsync(string nodeId, CancellationToken ct = default);
+    Task<NamespaceLease?> GetActiveLeaseAsync(string namespaceName, CancellationToken ct = default);
 
     bool IsOwnedLocally(string namespaceName);
 }

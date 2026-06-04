@@ -7,7 +7,7 @@ using Pulsy.EKV.Node.Models;
 using Pulsy.EKV.Node.Storage;
 using Pulsy.EKV.Node.Storage.DatabasePool;
 
-namespace Pulsy.EKV.Node.Cluster.Coordination;
+namespace Pulsy.EKV.Node.Cluster.Status;
 
 public sealed class NodeStatusPublisher : IHostedService, IDisposable
 {
@@ -42,7 +42,7 @@ public sealed class NodeStatusPublisher : IHostedService, IDisposable
         _store = await _kv.CreateOrUpdateStoreAsync(
             new NatsKVConfig(NatsBuckets.NodeStatus)
             {
-                MaxAge = TimeSpan.FromSeconds(_clusterConfig.StatusTtlSeconds)
+                MaxAge = TimeSpan.FromSeconds(_clusterConfig.StatusTtlSeconds),
             },
             ct);
 
@@ -51,14 +51,29 @@ public sealed class NodeStatusPublisher : IHostedService, IDisposable
         var interval = TimeSpan.FromSeconds(_clusterConfig.StatusIntervalSeconds);
         _timer = new Timer(_ => _ = PublishStatusAsync(token), null, TimeSpan.Zero, interval);
 
-        _logger.LogInformation("Node status publisher started (bucket: {Bucket}, interval: {Interval}s)", NatsBuckets.NodeStatus, interval.TotalSeconds);
+        _logger.LogInformation(
+            "Node status publisher started (bucket: {Bucket}, interval: {Interval}s)",
+            NatsBuckets.NodeStatus,
+            interval.TotalSeconds);
     }
 
-    public Task StopAsync(CancellationToken ct)
+    public async Task StopAsync(CancellationToken ct)
     {
         _timer?.Change(Timeout.Infinite, Timeout.Infinite);
         _cts?.Cancel();
-        return Task.CompletedTask;
+
+        try
+        {
+            if (_store != null)
+            {
+                await _store.DeleteAsync(_nodeConfig.Id, cancellationToken: ct);
+                _logger.LogInformation("Node status removed from cluster");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to remove node status on shutdown");
+        }
     }
 
     public void Dispose()

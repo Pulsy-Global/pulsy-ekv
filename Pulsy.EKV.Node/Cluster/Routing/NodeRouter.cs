@@ -7,42 +7,47 @@ using Pulsy.EKV.Grpc;
 using Pulsy.EKV.Node.Cluster.Leasing;
 using Pulsy.EKV.Node.Configuration;
 using Pulsy.EKV.Node.Models;
-using Pulsy.EKV.Node.Storage;
-using Pulsy.EKV.Node.Storage.DatabasePool;
 
 namespace Pulsy.EKV.Node.Cluster.Routing;
 
 public sealed class NodeRouter : IAsyncDisposable, IHostedService
 {
-    private readonly DatabasePool _pool;
     private readonly ILeaseManager _leaseManager;
     private readonly NatsKVContext _kv;
     private readonly ConcurrentDictionary<string, GrpcChannel> _channels = new();
     private readonly ILogger<NodeRouter> _logger;
+    private readonly string _nodeId;
+    private readonly string _localEndpoint;
     private readonly int _maxGrpcMessageBytes;
+    private readonly TimeSpan _cleanupInterval;
     private Timer? _cleanupTimer;
 
     public NodeRouter(
-        DatabasePool pool,
         ILeaseManager leaseManager,
         NatsKVContext kv,
         IOptions<LimitsConfig> limits,
         IOptions<ClusterConfig> clusterConfig,
+        IOptions<NodeConfig> nodeConfig,
         ILogger<NodeRouter> logger)
     {
-        _pool = pool;
         _leaseManager = leaseManager;
         _kv = kv;
         _logger = logger;
+        _nodeId = nodeConfig.Value.Id;
+        _localEndpoint = NormalizeEndpoint(nodeConfig.Value.GrpcEndpoint);
         _maxGrpcMessageBytes = limits.Value.MaxGrpcMessageBytes;
-
-        var interval = TimeSpan.FromSeconds(clusterConfig.Value.StatusIntervalSeconds * 3);
-        _cleanupTimer = new Timer(_ => EvictStaleChannels(), null, interval, interval);
+        _cleanupInterval = TimeSpan.FromSeconds(clusterConfig.Value.StatusIntervalSeconds * 3);
     }
 
-    public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
-
-    public SlateDbStore? GetLocalStore(string namespaceName) => _pool.TryGet(namespaceName);
+    public Task StartAsync(CancellationToken ct)
+    {
+        _cleanupTimer = new Timer(
+            _ => _ = EvictStaleChannelsAsync(),
+            null,
+            _cleanupInterval,
+            _cleanupInterval);
+        return Task.CompletedTask;
+    }
 
     public async Task StopAsync(CancellationToken ct)
     {
@@ -58,33 +63,35 @@ public sealed class NodeRouter : IAsyncDisposable, IHostedService
         string namespaceName,
         CancellationToken ct = default)
     {
-        var owner = await _leaseManager.GetOwnerAsync(namespaceName, ct);
-        if (owner == null)
+        var lease = await _leaseManager.GetActiveLeaseAsync(namespaceName, ct);
+        if (lease == null)
         {
             _logger.LogWarning("No owner found for namespace {Namespace}", namespaceName);
             return null;
         }
 
-        var endpoint = await ResolveEndpointAsync(owner, ct);
-        if (endpoint == null)
+        var owner = lease.NodeId;
+        var endpoint = lease.Endpoint;
+        if (string.IsNullOrWhiteSpace(endpoint))
         {
-            _logger.LogWarning("No endpoint found for node {Node}", owner);
+            _logger.LogWarning(
+                "Lease for namespace {Namespace} owned by node {Node} has no endpoint",
+                namespaceName,
+                owner);
+            return null;
+        }
+
+        if (owner == _nodeId || string.Equals(NormalizeEndpoint(endpoint), _localEndpoint, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "Refusing to forward namespace {Namespace} to stale local owner {Owner} at {Endpoint}",
+                namespaceName,
+                owner,
+                endpoint);
             return null;
         }
 
         return new EkvStore.EkvStoreClient(GetOrCreateChannel(endpoint));
-    }
-
-    public async Task<EkvAdmin.EkvAdminClient?> GetForwardingAdminClientAsync(
-        CancellationToken ct = default)
-    {
-        var endpoint = await GetAnyNodeEndpointAsync(ct);
-        if (endpoint == null)
-        {
-            return null;
-        }
-
-        return new EkvAdmin.EkvAdminClient(GetOrCreateChannel(endpoint));
     }
 
     public async ValueTask DisposeAsync()
@@ -102,63 +109,25 @@ public sealed class NodeRouter : IAsyncDisposable, IHostedService
         _channels.Clear();
     }
 
-    private GrpcChannel GetOrCreateChannel(string endpoint) =>
-        _channels.GetOrAdd(endpoint, ep => GrpcChannel.ForAddress(ep, new GrpcChannelOptions
+    private static string NormalizeEndpoint(string endpoint)
+    {
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
+        {
+            return endpoint.TrimEnd('/');
+        }
+
+        return uri.GetComponents(UriComponents.SchemeAndServer, UriFormat.Unescaped);
+    }
+
+    private GrpcChannel GetOrCreateChannel(string endpoint)
+    {
+        var normalizedEndpoint = NormalizeEndpoint(endpoint);
+        return _channels.GetOrAdd(normalizedEndpoint, ep => GrpcChannel.ForAddress(ep, new GrpcChannelOptions
         {
             MaxReceiveMessageSize = _maxGrpcMessageBytes,
             MaxSendMessageSize = _maxGrpcMessageBytes,
         }));
-
-    private async Task<string?> ResolveEndpointAsync(string nodeId, CancellationToken ct)
-    {
-        try
-        {
-            var store = await _kv.GetStoreAsync(NatsBuckets.NodeStatus, ct);
-            var result = await store.TryGetEntryAsync<string>(nodeId, cancellationToken: ct);
-            if (!result.Success)
-            {
-                return null;
-            }
-
-            var status = JsonSerializer.Deserialize<NodeStatus>(result.Value.Value!);
-            return status?.GrpcEndpoint;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to resolve endpoint for node {Node}", nodeId);
-            return null;
-        }
     }
-
-    private async Task<string?> GetAnyNodeEndpointAsync(CancellationToken ct)
-    {
-        try
-        {
-            var store = await _kv.GetStoreAsync(NatsBuckets.NodeStatus, ct);
-            await foreach (var key in store.GetKeysAsync(cancellationToken: ct))
-            {
-                var result = await store.TryGetEntryAsync<string>(key, cancellationToken: ct);
-                if (!result.Success)
-                {
-                    continue;
-                }
-
-                var status = JsonSerializer.Deserialize<NodeStatus>(result.Value.Value!);
-                if (status?.GrpcEndpoint != null)
-                {
-                    return status.GrpcEndpoint;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to find any node endpoint");
-        }
-
-        return null;
-    }
-
-    private async void EvictStaleChannels() => await EvictStaleChannelsAsync();
 
     private async Task EvictStaleChannelsAsync()
     {
@@ -177,7 +146,7 @@ public sealed class NodeRouter : IAsyncDisposable, IHostedService
                 var status = JsonSerializer.Deserialize<NodeStatus>(result.Value.Value!);
                 if (status?.GrpcEndpoint != null)
                 {
-                    liveEndpoints.Add(status.GrpcEndpoint);
+                    liveEndpoints.Add(NormalizeEndpoint(status.GrpcEndpoint));
                 }
             }
 

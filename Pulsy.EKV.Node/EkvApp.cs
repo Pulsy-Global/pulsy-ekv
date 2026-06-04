@@ -5,6 +5,7 @@ using Pulsy.EKV.Node.Configuration;
 using Pulsy.EKV.Node.Configuration.Backends;
 using Pulsy.EKV.Node.Configuration.Pool;
 using Pulsy.EKV.Node.Diagnostics;
+using Pulsy.EKV.Node.Extensions;
 using Pulsy.EKV.Node.Grpc;
 using Pulsy.EKV.Node.Storage.DatabasePool;
 
@@ -28,6 +29,8 @@ public static class EkvApp
         builder.Services.Configure<LimitsConfig>(builder.Configuration.GetSection("Limits"));
         builder.Services.Configure<DiagnosticsConfig>(builder.Configuration.GetSection("Diagnostics"));
         builder.Services.Configure<BackendsConfig>(builder.Configuration);
+        builder.Services.PostConfigure<BackendsConfig>(c =>
+            c.Backends.TryAdd("local", new BackendConfig { Type = BackendType.Local }));
 
         builder.Services.AddSingleton<DatabasePool>();
         builder.Services.AddSingleton<EkvMetrics>();

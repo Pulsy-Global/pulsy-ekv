@@ -17,7 +17,11 @@ public sealed class EkvMetrics
     private readonly Counter<long> _leaseLost;
     private readonly Counter<long> _leaseReleased;
 
-    public EkvMetrics(IMeterFactory meterFactory, DatabasePool pool, IOptions<NodeConfig> nodeConfig, ILeaseManager? leaseManager = null)
+    public EkvMetrics(
+        IMeterFactory meterFactory,
+        DatabasePool pool,
+        IOptions<NodeConfig> nodeConfig,
+        ILeaseManager? leaseManager = null)
     {
         var meter = meterFactory.Create(MeterName);
         var dataPath = nodeConfig.Value.DataPath;

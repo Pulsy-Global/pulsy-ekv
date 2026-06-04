@@ -28,8 +28,4 @@
         <Protobuf Include="..\proto\ekv.proto" GrpcServices="Both" />
     </ItemGroup>
 
-    <ItemGroup>
-      <Folder Include="data\" />
-    </ItemGroup>
-
 </Project>

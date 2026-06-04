@@ -4,7 +4,7 @@ public sealed class DiskCacheConfig
 {
     public bool Enabled { get; set; }
 
-    public string RootFolder { get; set; } = "data/cache";
+    public string RootFolder { get; set; } = "cache";
 
     public int? MaxSizeMb { get; set; }
 

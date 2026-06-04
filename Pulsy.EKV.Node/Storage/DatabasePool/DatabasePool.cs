@@ -14,12 +14,14 @@ public sealed class DatabasePool : IHostedService
     private const string LocalStorageUrlScheme = "file:///";
 
     private readonly ConcurrentDictionary<string, PoolEntry> _entries = new();
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _namespaceLocks = new();
     private readonly SemaphoreSlim _openLock = new(1, 1);
     private readonly NodeConfig _nodeConfig;
     private readonly PoolConfig _poolConfig;
     private readonly BackendsConfig _backends;
     private readonly ILogger<DatabasePool> _logger;
-    private readonly Timer _evictionTimer;
+    private readonly TimeSpan _evictionInterval;
+    private Timer? _evictionTimer;
     private EkvMetrics? _metrics;
 
     public DatabasePool(
@@ -32,40 +34,37 @@ public sealed class DatabasePool : IHostedService
         _poolConfig = poolConfig.Value;
         _backends = backends.Value;
         _logger = logger;
-        var evictionInterval = TimeSpan.FromSeconds(_poolConfig.EvictionIntervalSeconds);
-        _evictionTimer = new Timer(
-            EvictIdle,
-            null,
-            evictionInterval,
-            evictionInterval);
+        _evictionInterval = TimeSpan.FromSeconds(_poolConfig.EvictionIntervalSeconds);
     }
 
     public bool WalEnabled => _poolConfig.WalEnabled;
 
     public int OpenCount => _entries.Count;
 
-    public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
+    public Task StartAsync(CancellationToken ct)
+    {
+        _evictionTimer = new Timer(
+            EvictIdle,
+            null,
+            _evictionInterval,
+            _evictionInterval);
+        return Task.CompletedTask;
+    }
 
     public async Task StopAsync(CancellationToken ct)
     {
-        await _evictionTimer.DisposeAsync();
+        if (_evictionTimer != null)
+        {
+            await _evictionTimer.DisposeAsync();
+        }
+
+        _evictionTimer = null;
         await FlushAndCloseAllAsync();
         _openLock.Dispose();
     }
 
-    public IReadOnlyList<(string Name, SlateDbStore Store)> GetOpenEntries()
-        => _entries.Select(e => (e.Key, e.Value.Store)).ToList();
-
-    public SlateDbStore? TryGet(string namespaceName)
-    {
-        if (_entries.TryGetValue(namespaceName, out var entry))
-        {
-            entry.LastAccess = DateTime.UtcNow;
-            return entry.Store;
-        }
-
-        return null;
-    }
+    public IReadOnlyList<OpenNamespaceInfo> ListOpenNamespaces()
+        => _entries.Select(e => new OpenNamespaceInfo(e.Key, e.Value.BackendName)).ToList();
 
     public StoreHandle? Acquire(string namespaceName)
     {
@@ -98,81 +97,51 @@ public sealed class DatabasePool : IHostedService
             return existing.Store;
         }
 
-        await _openLock.WaitAsync();
+        var namespaceLock = GetNamespaceLock(namespaceName);
+        await namespaceLock.WaitAsync();
         try
         {
-            if (_entries.TryGetValue(namespaceName, out existing))
-            {
-                existing.LastAccess = DateTime.UtcNow;
-                return existing.Store;
-            }
-
-            if (_entries.Count >= _poolConfig.MaxOpen)
-            {
-                EvictLru();
-            }
-
-            var backend = ResolveBackend(backendName);
-
-            SlateDb db;
-            var maxRetries = _poolConfig.OpenRetryMaxAttempts;
-            for (var attempt = 1; ; attempt++)
-            {
-                try
-                {
-                    db = backend.Type switch
-                    {
-                        BackendType.S3 => await Task.Run(() => OpenS3(namespaceName, backend)),
-                        _ => await Task.Run(() => OpenLocal(namespaceName)),
-                    };
-                    break;
-                }
-                catch (SlateDbException ex) when (attempt < maxRetries && ex.Message.Contains("newer DB client"))
-                {
-                    _logger.LogWarning(
-                        ex,
-                        "Fencing error opening namespace {Namespace}, retrying ({Attempt}/{Max})",
-                        namespaceName,
-                        attempt,
-                        maxRetries);
-                    await Task.Delay(_poolConfig.OpenRetryBaseDelayMs * attempt);
-                }
-                catch (SlateDbException ex)
-                {
-                    _logger.LogError(
-                        ex,
-                        "Failed to open database for namespace {Namespace} (backend: {Backend})",
-                        namespaceName,
-                        backendName);
-                    throw;
-                }
-            }
-
-            var store = new SlateDbStore(db);
-            var entry = new PoolEntry(store, backendName);
-
-            _entries[namespaceName] = entry;
-            return store;
+            return await GetOrOpenUnderNamespaceLockAsync(namespaceName, backendName);
         }
         finally
         {
-            _openLock.Release();
+            namespaceLock.Release();
         }
     }
 
     public async Task CloseAsync(string namespaceName)
     {
-        if (_entries.TryRemove(namespaceName, out var entry))
+        var namespaceLock = GetNamespaceLock(namespaceName);
+        await namespaceLock.WaitAsync();
+        try
         {
+            PoolEntry entry;
+            await _openLock.WaitAsync();
+            try
+            {
+                if (!_entries.TryRemove(namespaceName, out entry!))
+                {
+                    return;
+                }
+            }
+            finally
+            {
+                _openLock.Release();
+            }
+
             _logger.LogInformation("Closing SlateDB for namespace {Namespace}", namespaceName);
-            await Task.Run(() => FlushAndClose(namespaceName, entry.Store));
+            await WaitForActiveOperationsAsync(namespaceName, entry);
+            await Task.Run(() => CloseEntry(namespaceName, entry, flush: true));
+        }
+        finally
+        {
+            namespaceLock.Release();
         }
     }
 
-    public async Task DeleteDataAsync(string namespaceName)
+    public async Task DeleteDataAsync(string namespaceName, string? backendName = null)
     {
-        string? backendName = null;
-        if (_entries.TryGetValue(namespaceName, out var entry))
+        if (backendName == null && _entries.TryGetValue(namespaceName, out var entry))
         {
             backendName = entry.BackendName;
         }
@@ -203,32 +172,163 @@ public sealed class DatabasePool : IHostedService
 
     internal void SetMetrics(EkvMetrics metrics) => _metrics = metrics;
 
+    internal IReadOnlyList<OpenStoreSnapshot> ListOpenStores()
+        => _entries.Select(e => new OpenStoreSnapshot(e.Key, e.Value.Store)).ToList();
+
+    private async Task<SlateDbStore> GetOrOpenUnderNamespaceLockAsync(string namespaceName, string backendName)
+    {
+        if (_entries.TryGetValue(namespaceName, out var existing))
+        {
+            existing.LastAccess = DateTime.UtcNow;
+            return existing.Store;
+        }
+
+        await _openLock.WaitAsync();
+        try
+        {
+            if (_entries.TryGetValue(namespaceName, out existing))
+            {
+                existing.LastAccess = DateTime.UtcNow;
+                return existing.Store;
+            }
+
+            if (_entries.Count >= _poolConfig.MaxOpen)
+            {
+                EvictLru();
+            }
+
+            var backend = ResolveBackend(backendName);
+
+            var diskCacheRoot = backend.Type == BackendType.S3 && _poolConfig.DiskCache.Enabled
+                ? NamespaceDiskCache.GetNamespaceRoot(_poolConfig.DiskCache, namespaceName, _nodeConfig.DataPath)
+                : null;
+
+            SlateDb db;
+            var maxRetries = _poolConfig.OpenRetryMaxAttempts;
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    db = backend.Type switch
+                    {
+                        BackendType.S3 => await Task.Run(() => OpenS3(namespaceName, backend, diskCacheRoot)),
+                        _ => await Task.Run(() => OpenLocal(namespaceName)),
+                    };
+                    break;
+                }
+                catch (SlateDbException ex) when (attempt < maxRetries && ex.Message.Contains("newer DB client"))
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Fencing error opening namespace {Namespace}, retrying ({Attempt}/{Max})",
+                        namespaceName,
+                        attempt,
+                        maxRetries);
+                    await Task.Delay(_poolConfig.OpenRetryBaseDelayMs * attempt);
+                }
+                catch (SlateDbException ex)
+                {
+                    _logger.LogError(
+                        ex,
+                        "Failed to open database for namespace {Namespace} (backend: {Backend})",
+                        namespaceName,
+                        backendName);
+                    throw;
+                }
+            }
+
+            var store = new SlateDbStore(db);
+            var entry = new PoolEntry(store, backendName, backend.Type, diskCacheRoot);
+
+            _entries[namespaceName] = entry;
+            return store;
+        }
+        finally
+        {
+            _openLock.Release();
+        }
+    }
+
+    private SemaphoreSlim GetNamespaceLock(string namespaceName)
+        => _namespaceLocks.GetOrAdd(namespaceName, _ => new SemaphoreSlim(1, 1));
+
     private async Task FlushAndCloseAllAsync()
     {
         _logger.LogInformation("Flushing and closing {Count} open databases", _entries.Count);
-        var tasks = _entries.Select(kvp => Task.Run(() => FlushAndClose(kvp.Key, kvp.Value.Store)));
+        var tasks = _entries.Select(kvp => Task.Run(() => CloseEntry(kvp.Key, kvp.Value, flush: true)));
         await Task.WhenAll(tasks);
         _entries.Clear();
     }
 
-    private void FlushAndClose(string namespaceName, SlateDbStore store)
+    private async Task WaitForActiveOperationsAsync(string namespaceName, PoolEntry entry)
     {
-        try
+        var activeOps = entry.ActiveOps;
+        if (activeOps == 0)
         {
-            store.Flush();
+            return;
         }
-        catch (Exception ex)
+
+        _logger.LogInformation(
+            "Waiting for {ActiveOps} active operation(s) before closing namespace {Namespace}",
+            activeOps,
+            namespaceName);
+
+        await entry.WaitForIdleAsync();
+    }
+
+    private void CloseEntry(string namespaceName, PoolEntry entry, bool flush)
+    {
+        if (flush)
         {
-            _logger.LogWarning(ex, "Error flushing namespace {Namespace}, proceeding to close", namespaceName);
+            try
+            {
+                entry.Store.Flush();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error flushing namespace {Namespace}, proceeding to close", namespaceName);
+            }
         }
 
         try
         {
-            store.Dispose();
+            entry.Store.Dispose();
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error closing namespace {Namespace}", namespaceName);
+        }
+
+        DropDiskCacheAfterClose(namespaceName, entry);
+    }
+
+    private void DropDiskCacheAfterClose(string namespaceName, PoolEntry entry)
+    {
+        if (entry.BackendType != BackendType.S3 || entry.DiskCacheRoot == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var deleted = NamespaceDiskCache.DeleteNamespaceCache(entry.DiskCacheRoot);
+            if (!deleted)
+            {
+                return;
+            }
+
+            _logger.LogInformation(
+                "Dropped disk cache for namespace {Namespace} at {Path}",
+                namespaceName,
+                entry.DiskCacheRoot);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to drop disk cache for namespace {Namespace} at {Path}",
+                namespaceName,
+                entry.DiskCacheRoot);
         }
     }
 
@@ -251,7 +351,7 @@ public sealed class DatabasePool : IHostedService
         return SlateDb.Builder(namespaceName, url).WithSettings(BuildSettings()).Build();
     }
 
-    private SlateDb OpenS3(string namespaceName, BackendConfig cfg)
+    private SlateDb OpenS3(string namespaceName, BackendConfig cfg, string? diskCacheRoot)
     {
         _logger.LogInformation(
             "Opening SlateDB for namespace {Namespace} on S3 bucket {Bucket}",
@@ -268,10 +368,10 @@ public sealed class DatabasePool : IHostedService
             AllowHttp = cfg.AllowHttp,
         });
 
-        return builder.WithSettings(BuildSettings(withDiskCache: true)).Build();
+        return builder.WithSettings(BuildSettings(diskCacheRoot)).Build();
     }
 
-    private SlateDbSettings BuildSettings(bool withDiskCache = false)
+    private SlateDbSettings BuildSettings(string? diskCacheRoot = null)
     {
         var bf = _poolConfig.BloomFilter;
         var compactor = _poolConfig.Compactor;
@@ -295,7 +395,7 @@ public sealed class DatabasePool : IHostedService
         };
 
         var dc = _poolConfig.DiskCache;
-        if (withDiskCache && dc.Enabled)
+        if (diskCacheRoot != null && dc.Enabled)
         {
             var budgetPerInstance = dc.TotalDiskBudgetMb > 0 && _poolConfig.MaxOpen > 0
                 ? dc.TotalDiskBudgetMb / _poolConfig.MaxOpen
@@ -313,7 +413,7 @@ public sealed class DatabasePool : IHostedService
             {
                 CacheOptions = new CacheOptions
                 {
-                    RootFolder = dc.RootFolder,
+                    RootFolder = diskCacheRoot,
                     MaxCacheSizeBytes = (ulong)Math.Max(1, perInstanceMb) * 1024 * 1024,
                     CachePuts = dc.CachePuts,
                     PreloadDiskCacheOnStartup = dc.PreloadL0 ? PreloadLevel.L0Sst : null,
@@ -364,14 +464,7 @@ public sealed class DatabasePool : IHostedService
 
                     _metrics?.RecordEviction();
                     _logger.LogInformation("Evicting idle namespace {Namespace}", name);
-                    try
-                    {
-                        removed.Store.Dispose();
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Error disposing namespace {Namespace}", name);
-                    }
+                    CloseEntry(name, removed, flush: false);
                 }
             }
             finally
@@ -398,7 +491,8 @@ public sealed class DatabasePool : IHostedService
 
             _metrics?.RecordEviction();
             _logger.LogInformation("Evicting LRU namespace {Namespace}", oldest.Key);
-            entry.Store.Dispose();
+
+            CloseEntry(oldest.Key, entry, flush: false);
         }
     }
 }
