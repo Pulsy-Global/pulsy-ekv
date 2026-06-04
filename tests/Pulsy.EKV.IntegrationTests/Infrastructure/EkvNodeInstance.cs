@@ -79,6 +79,11 @@ public sealed class EkvNodeInstance : IAsyncDisposable
 
     public Task StopAsync(CancellationToken ct = default) => _app.StopAsync(ct);
 
+    public bool IsNamespaceOpen(string name)
+        => Services.GetRequiredService<DatabasePool>()
+            .ListOpenNamespaces()
+            .Any(ns => string.Equals(ns.Name, name, StringComparison.Ordinal));
+
     public async Task CreateNamespaceAsync(string name, CancellationToken ct = default)
     {
         var registry = Services.GetRequiredService<INamespaceRegistry>();

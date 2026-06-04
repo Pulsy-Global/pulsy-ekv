@@ -32,12 +32,10 @@ public sealed class EphemeralWriterLeaseTests
     public async Task FirstRequestCanOpenNamespaceWithoutPreassignedOwner()
     {
         var ns = $"lazy-open-{Guid.NewGuid():N}";
-        var node1OpenBefore = _fixture.Node1.OpenNamespaceCount;
-        var node2OpenBefore = _fixture.Node2.OpenNamespaceCount;
         await _fixture.Node1.CreateNamespaceRegistryEntryAsync(ns, TestContext.Current.CancellationToken);
 
-        Assert.Equal(node1OpenBefore, _fixture.Node1.OpenNamespaceCount);
-        Assert.Equal(node2OpenBefore, _fixture.Node2.OpenNamespaceCount);
+        Assert.False(_fixture.Node1.IsNamespaceOpen(ns));
+        Assert.False(_fixture.Node2.IsNamespaceOpen(ns));
 
         var kv = _fixture.Client2.Namespace(ns);
         await kv.PutAsync("key", "value"u8.ToArray(), TestContext.Current.CancellationToken);
@@ -46,8 +44,8 @@ public sealed class EphemeralWriterLeaseTests
 
         Assert.NotNull(value);
         Assert.Equal("value", Encoding.UTF8.GetString(value));
-        Assert.Equal(node1OpenBefore, _fixture.Node1.OpenNamespaceCount);
-        Assert.Equal(node2OpenBefore + 1, _fixture.Node2.OpenNamespaceCount);
+        Assert.False(_fixture.Node1.IsNamespaceOpen(ns));
+        Assert.True(_fixture.Node2.IsNamespaceOpen(ns));
     }
 
     [Fact]
@@ -123,20 +121,18 @@ public sealed class EphemeralWriterLeaseTests
     public async Task AdminUpdateOnNonOwnerDoesNotOpenSlateDbWithoutLease()
     {
         var ns = $"admin-update-non-owner-{Guid.NewGuid():N}";
-        var node1OpenBefore = _fixture.Node1.OpenNamespaceCount;
-        var node2OpenBefore = _fixture.Node2.OpenNamespaceCount;
 
         await _fixture.Node1.CreateNamespaceAsync(ns, TestContext.Current.CancellationToken);
 
-        Assert.Equal(node1OpenBefore + 1, _fixture.Node1.OpenNamespaceCount);
-        Assert.Equal(node2OpenBefore, _fixture.Node2.OpenNamespaceCount);
+        Assert.True(_fixture.Node1.IsNamespaceOpen(ns));
+        Assert.False(_fixture.Node2.IsNamespaceOpen(ns));
 
         await _fixture.Client2.Admin().UpdateNamespaceAsync(
             new NamespaceInfo { Name = ns, Backend = "remote-test" },
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(node1OpenBefore + 1, _fixture.Node1.OpenNamespaceCount);
-        Assert.Equal(node2OpenBefore, _fixture.Node2.OpenNamespaceCount);
+        Assert.True(_fixture.Node1.IsNamespaceOpen(ns));
+        Assert.False(_fixture.Node2.IsNamespaceOpen(ns));
     }
 
     [Fact]
@@ -237,8 +233,6 @@ public sealed class EphemeralWriterLeaseTests
         var ns = $"concurrent-open-{Guid.NewGuid():N}";
         await _fixture.Node1.CreateNamespaceRegistryEntryAsync(ns, TestContext.Current.CancellationToken);
 
-        var node1OpenBefore = _fixture.Node1.OpenNamespaceCount;
-        var node2OpenBefore = _fixture.Node2.OpenNamespaceCount;
         var node1Kv = _fixture.Client1.Namespace(ns);
         var node2Kv = _fixture.Client2.Namespace(ns);
 
@@ -254,15 +248,15 @@ public sealed class EphemeralWriterLeaseTests
         Assert.Equal("value-2", Encoding.UTF8.GetString(value1));
         Assert.Equal("value-1", Encoding.UTF8.GetString(value2));
 
-        var node1Opened = _fixture.Node1.OpenNamespaceCount - node1OpenBefore;
-        var node2Opened = _fixture.Node2.OpenNamespaceCount - node2OpenBefore;
-        Assert.Equal(1, node1Opened + node2Opened);
+        var node1Opened = _fixture.Node1.IsNamespaceOpen(ns);
+        var node2Opened = _fixture.Node2.IsNamespaceOpen(ns);
+        Assert.NotEqual(node1Opened, node2Opened);
 
         using var lease = await ReadLeaseDocumentAsync(ns);
         var owner = lease.RootElement.GetProperty("nodeId").GetString();
         Assert.True(owner == _fixture.Node1.NodeId || owner == _fixture.Node2.NodeId);
-        Assert.Equal(owner == _fixture.Node1.NodeId ? 1 : 0, node1Opened);
-        Assert.Equal(owner == _fixture.Node2.NodeId ? 1 : 0, node2Opened);
+        Assert.Equal(owner == _fixture.Node1.NodeId, node1Opened);
+        Assert.Equal(owner == _fixture.Node2.NodeId, node2Opened);
     }
 
     [Fact]
@@ -271,7 +265,6 @@ public sealed class EphemeralWriterLeaseTests
         var ns = $"expired-remote-lease-{Guid.NewGuid():N}";
         await _fixture.Node1.CreateNamespaceRegistryEntryAsync(ns, TestContext.Current.CancellationToken);
 
-        var node2OpenBefore = _fixture.Node2.OpenNamespaceCount;
         var now = DateTimeOffset.UtcNow;
         var staleLease = JsonSerializer.Serialize(new
         {
@@ -290,7 +283,7 @@ public sealed class EphemeralWriterLeaseTests
 
         using var lease = await ReadLeaseDocumentAsync(ns);
         Assert.Equal(_fixture.Node2.NodeId, lease.RootElement.GetProperty("nodeId").GetString());
-        Assert.Equal(node2OpenBefore + 1, _fixture.Node2.OpenNamespaceCount);
+        Assert.True(_fixture.Node2.IsNamespaceOpen(ns));
     }
 
     [Fact]
@@ -300,7 +293,6 @@ public sealed class EphemeralWriterLeaseTests
         await _fixture.Node1.CreateNamespaceAsync(ns, TestContext.Current.CancellationToken);
         await WaitForNodeStatusAsync(_fixture.Node1.NodeId);
 
-        var node2OpenBefore = _fixture.Node2.OpenNamespaceCount;
         var now = DateTimeOffset.UtcNow;
         var store = await GetLeaseStoreAsync();
         var current = await store.TryGetEntryAsync<string>(
@@ -330,7 +322,7 @@ public sealed class EphemeralWriterLeaseTests
             () => _fixture.Client2.Namespace(ns).PutAsync("key", "value"u8.ToArray(), cts.Token));
 
         Assert.Equal(StatusCode.Unavailable, ex.StatusCode);
-        Assert.Equal(node2OpenBefore, _fixture.Node2.OpenNamespaceCount);
+        Assert.False(_fixture.Node2.IsNamespaceOpen(ns));
     }
 
     [Fact]
@@ -339,7 +331,6 @@ public sealed class EphemeralWriterLeaseTests
         var ns = $"bare-string-lease-{Guid.NewGuid():N}";
         await _fixture.Node1.CreateNamespaceAsync(ns, TestContext.Current.CancellationToken);
 
-        var node2OpenBefore = _fixture.Node2.OpenNamespaceCount;
         var store = await GetLeaseStoreAsync();
         var current = await store.TryGetEntryAsync<string>(
             "ns." + ns,
@@ -360,7 +351,7 @@ public sealed class EphemeralWriterLeaseTests
             () => _fixture.Client2.Namespace(ns).PutAsync("key", "value"u8.ToArray(), cts.Token));
 
         Assert.Equal(StatusCode.Unavailable, ex.StatusCode);
-        Assert.Equal(node2OpenBefore, _fixture.Node2.OpenNamespaceCount);
+        Assert.False(_fixture.Node2.IsNamespaceOpen(ns));
     }
 
     [Fact]
@@ -369,7 +360,6 @@ public sealed class EphemeralWriterLeaseTests
         var ns = $"malformed-lease-{Guid.NewGuid():N}";
         await _fixture.Node1.CreateNamespaceRegistryEntryAsync(ns, TestContext.Current.CancellationToken);
 
-        var node2OpenBefore = _fixture.Node2.OpenNamespaceCount;
         var store = await GetLeaseStoreAsync();
         await store.PutAsync(
             "ns." + ns,
@@ -383,7 +373,7 @@ public sealed class EphemeralWriterLeaseTests
             () => _fixture.Client2.Namespace(ns).PutAsync("key", "value"u8.ToArray(), cts.Token));
 
         Assert.Equal(StatusCode.Unavailable, ex.StatusCode);
-        Assert.Equal(node2OpenBefore, _fixture.Node2.OpenNamespaceCount);
+        Assert.False(_fixture.Node2.IsNamespaceOpen(ns));
     }
 
     [Fact]
