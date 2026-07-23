@@ -12,17 +12,19 @@ namespace Pulsy.EKV.Node.Cluster.Status;
 public sealed class NodeStatusPublisher : IHostedService, IDisposable
 {
     private readonly NatsKVContext _kv;
+    private readonly NatsHealthState _natsHealth;
     private readonly NodeConfig _nodeConfig;
     private readonly ClusterConfig _clusterConfig;
     private readonly PoolConfig _poolConfig;
     private readonly DatabasePool _pool;
     private readonly ILogger<NodeStatusPublisher> _logger;
     private INatsKVStore? _store;
-    private Timer? _timer;
     private CancellationTokenSource? _cts;
+    private Task? _publishTask;
 
     public NodeStatusPublisher(
         NatsKVContext kv,
+        NatsHealthState natsHealth,
         IOptions<NodeConfig> nodeConfig,
         IOptions<ClusterConfig> clusterConfig,
         IOptions<PoolConfig> poolConfig,
@@ -30,6 +32,7 @@ public sealed class NodeStatusPublisher : IHostedService, IDisposable
         ILogger<NodeStatusPublisher> logger)
     {
         _kv = kv;
+        _natsHealth = natsHealth;
         _nodeConfig = nodeConfig.Value;
         _clusterConfig = clusterConfig.Value;
         _poolConfig = poolConfig.Value;
@@ -45,11 +48,11 @@ public sealed class NodeStatusPublisher : IHostedService, IDisposable
                 MaxAge = TimeSpan.FromSeconds(_clusterConfig.StatusTtlSeconds),
             },
             ct);
+        _natsHealth.ReportSuccess();
 
         _cts = new CancellationTokenSource();
-        var token = _cts.Token;
         var interval = TimeSpan.FromSeconds(_clusterConfig.StatusIntervalSeconds);
-        _timer = new Timer(_ => _ = PublishStatusAsync(token), null, TimeSpan.Zero, interval);
+        _publishTask = RunPublishLoopAsync(interval, _cts.Token);
 
         _logger.LogInformation(
             "Node status publisher started (bucket: {Bucket}, interval: {Interval}s)",
@@ -59,8 +62,19 @@ public sealed class NodeStatusPublisher : IHostedService, IDisposable
 
     public async Task StopAsync(CancellationToken ct)
     {
-        _timer?.Change(Timeout.Infinite, Timeout.Infinite);
         _cts?.Cancel();
+
+        if (_publishTask != null)
+        {
+            try
+            {
+                await _publishTask.WaitAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // Shutdown deadline reached or the publisher loop observed cancellation.
+            }
+        }
 
         try
         {
@@ -78,8 +92,23 @@ public sealed class NodeStatusPublisher : IHostedService, IDisposable
 
     public void Dispose()
     {
-        _timer?.Dispose();
         _cts?.Dispose();
+    }
+
+    private async Task RunPublishLoopAsync(TimeSpan interval, CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await PublishStatusAsync(ct);
+                await Task.Delay(interval, ct);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Shutdown in progress, expected.
+        }
     }
 
     private async Task PublishStatusAsync(CancellationToken ct)
@@ -104,8 +133,9 @@ public sealed class NodeStatusPublisher : IHostedService, IDisposable
 
             var json = JsonSerializer.Serialize(status);
             await _store!.PutAsync(_nodeConfig.Id, json, cancellationToken: ct);
+            _natsHealth.ReportSuccess();
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             // Shutdown in progress, expected.
         }

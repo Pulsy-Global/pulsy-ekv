@@ -20,7 +20,9 @@ public sealed class NodeRouter : IAsyncDisposable, IHostedService
     private readonly string _localEndpoint;
     private readonly int _maxGrpcMessageBytes;
     private readonly TimeSpan _cleanupInterval;
-    private Timer? _cleanupTimer;
+    private CancellationTokenSource? _cleanupCts;
+    private Task? _cleanupTask;
+    private int _disposeState;
 
     public NodeRouter(
         ILeaseManager leaseManager,
@@ -41,22 +43,30 @@ public sealed class NodeRouter : IAsyncDisposable, IHostedService
 
     public Task StartAsync(CancellationToken ct)
     {
-        _cleanupTimer = new Timer(
-            _ => _ = EvictStaleChannelsAsync(),
-            null,
-            _cleanupInterval,
-            _cleanupInterval);
+        _cleanupCts = new CancellationTokenSource();
+        _cleanupTask = RunCleanupLoopAsync(_cleanupCts.Token);
         return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken ct)
     {
-        if (_cleanupTimer != null)
+        var cleanupCts = Interlocked.Exchange(ref _cleanupCts, null);
+        var cleanupTask = Interlocked.Exchange(ref _cleanupTask, null);
+        cleanupCts?.Cancel();
+
+        if (cleanupTask != null)
         {
-            await _cleanupTimer.DisposeAsync();
+            try
+            {
+                await cleanupTask.WaitAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // Shutdown deadline reached or the cleanup loop observed cancellation.
+            }
         }
 
-        _cleanupTimer = null;
+        cleanupCts?.Dispose();
     }
 
     public async Task<EkvStore.EkvStoreClient?> GetForwardingClientAsync(
@@ -96,10 +106,28 @@ public sealed class NodeRouter : IAsyncDisposable, IHostedService
 
     public async ValueTask DisposeAsync()
     {
-        if (_cleanupTimer != null)
+        if (Interlocked.Exchange(ref _disposeState, 1) != 0)
         {
-            await _cleanupTimer.DisposeAsync();
+            return;
         }
+
+        var cleanupCts = Interlocked.Exchange(ref _cleanupCts, null);
+        var cleanupTask = Interlocked.Exchange(ref _cleanupTask, null);
+        cleanupCts?.Cancel();
+
+        if (cleanupTask != null)
+        {
+            try
+            {
+                await cleanupTask;
+            }
+            catch (OperationCanceledException)
+            {
+                // Shutdown in progress, expected.
+            }
+        }
+
+        cleanupCts?.Dispose();
 
         foreach (var channel in _channels.Values)
         {
@@ -129,15 +157,32 @@ public sealed class NodeRouter : IAsyncDisposable, IHostedService
         }));
     }
 
-    private async Task EvictStaleChannelsAsync()
+    private async Task RunCleanupLoopAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(_cleanupInterval);
+
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                await EvictStaleChannelsAsync(ct);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Shutdown in progress, expected.
+        }
+    }
+
+    private async Task EvictStaleChannelsAsync(CancellationToken ct)
     {
         try
         {
             var liveEndpoints = new HashSet<string>();
-            var store = await _kv.GetStoreAsync(NatsBuckets.NodeStatus);
-            await foreach (var key in store.GetKeysAsync())
+            var store = await _kv.GetStoreAsync(NatsBuckets.NodeStatus, ct);
+            await foreach (var key in store.GetKeysAsync(cancellationToken: ct))
             {
-                var result = await store.TryGetEntryAsync<string>(key);
+                var result = await store.TryGetEntryAsync<string>(key, cancellationToken: ct);
                 if (!result.Success)
                 {
                     continue;
@@ -163,6 +208,10 @@ public sealed class NodeRouter : IAsyncDisposable, IHostedService
                     channel.Dispose();
                 }
             }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Shutdown in progress, expected.
         }
         catch (Exception ex)
         {

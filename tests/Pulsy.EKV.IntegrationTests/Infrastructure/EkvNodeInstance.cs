@@ -28,7 +28,13 @@ public sealed class EkvNodeInstance : IAsyncDisposable
 
     public int OpenNamespaceCount => Services.GetRequiredService<DatabasePool>().OpenCount;
 
-    public static EkvNodeInstance Create(string nodeId, int port, string dataPath, string natsUrl)
+    public static EkvNodeInstance Create(
+        string nodeId,
+        int port,
+        string dataPath,
+        string natsUrl,
+        int natsHealthTimeoutSeconds = 120,
+        int natsRequestTimeoutSeconds = 30)
     {
         var overrides = new Dictionary<string, string?>
         {
@@ -45,9 +51,11 @@ public sealed class EkvNodeInstance : IAsyncDisposable
             ["Cluster:LeaseRenewSeconds"] = "3",
             ["Cluster:StatusTtlSeconds"] = "5",
             ["Cluster:StatusIntervalSeconds"] = "2",
+            ["Cluster:NatsHealthTimeoutSeconds"] = natsHealthTimeoutSeconds.ToString(),
 
             // NATS
             ["Nats:Url"] = natsUrl,
+            ["Nats:RequestTimeoutSeconds"] = natsRequestTimeoutSeconds.ToString(),
 
             // Backends (must provide a default backend)
             ["Backends:default:Type"] = "Local",

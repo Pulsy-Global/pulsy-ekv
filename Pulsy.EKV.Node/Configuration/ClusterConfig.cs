@@ -13,4 +13,6 @@ public sealed class ClusterConfig
     public int StatusTtlSeconds { get; set; } = 15;
 
     public int StatusIntervalSeconds { get; set; } = 10;
+
+    public int NatsHealthTimeoutSeconds { get; set; } = 120;
 }

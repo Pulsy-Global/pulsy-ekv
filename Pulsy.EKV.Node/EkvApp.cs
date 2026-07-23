@@ -1,6 +1,7 @@
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using Pulsy.EKV.Node.Cluster.Namespaces;
+using Pulsy.EKV.Node.Cluster.Status;
 using Pulsy.EKV.Node.Configuration;
 using Pulsy.EKV.Node.Configuration.Backends;
 using Pulsy.EKV.Node.Configuration.Pool;
@@ -68,8 +69,10 @@ public static class EkvApp
 
         app.MapGet(
             "/health",
-            (NamespaceCoordinator coordinator) =>
-            coordinator.IsHealthy ? Results.Ok("healthy") : Results.StatusCode(StatusCodes.Status503ServiceUnavailable));
+            (NamespaceCoordinator coordinator, NatsHealthState natsHealth) =>
+                coordinator.IsHealthy && natsHealth.IsHealthy
+                    ? Results.Ok("healthy")
+                    : Results.StatusCode(StatusCodes.Status503ServiceUnavailable));
 
         return app;
     }

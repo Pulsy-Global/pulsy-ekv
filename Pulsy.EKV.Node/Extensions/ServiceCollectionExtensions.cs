@@ -1,3 +1,5 @@
+using System.Threading.Channels;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
@@ -22,14 +24,21 @@ public static class ServiceCollectionExtensions
     {
         var clusterConfig = configuration.GetSection("Cluster").Get<ClusterConfig>()!;
 
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddSingleton<NatsHealthState>();
+
         if (clusterConfig.ClusterMode)
         {
-            services.AddNatsClient(nats => nats.ConfigureOptions(opts =>
-                opts.Configure<IOptions<NatsConfig>>((o, natsConfig) => o.Opts = o.Opts with
-                {
-                    Url = natsConfig.Value.Url,
-                    RequestTimeout = TimeSpan.FromSeconds(natsConfig.Value.RequestTimeoutSeconds),
-                })));
+            services.AddNatsClient(nats => nats
+                .ConfigureOptions(opts =>
+                    opts.Configure<IOptions<NatsConfig>>((o, natsConfig) => o.Opts = o.Opts with
+                    {
+                        Url = natsConfig.Value.Url,
+                        RequestTimeout = TimeSpan.FromSeconds(natsConfig.Value.RequestTimeoutSeconds),
+                    }))
+
+                // A full KV watcher must never block the shared socket reader (nats.net#1181).
+                .WithSubPendingChannelFullMode(BoundedChannelFullMode.DropNewest));
 
             services.AddSingleton(sp =>
                 new NatsKVContext(new NatsJSContext(sp.GetRequiredService<INatsConnection>())));
