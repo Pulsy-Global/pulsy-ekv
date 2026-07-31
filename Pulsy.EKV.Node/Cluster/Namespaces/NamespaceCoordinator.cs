@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using Pulsy.EKV.Node.Cluster.Leasing;
 using Pulsy.EKV.Node.Cluster.Registry;
@@ -19,7 +20,7 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
 
     private readonly ILeaseManager? _leaseManager;
 
-    private readonly SemaphoreSlim _namespaceLock = new(1, 1);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _namespaceLocks = new();
     private readonly NamespaceLifecycleTracker _lifecycle = new();
     private Timer? _renewTimer;
     private volatile bool _healthy = true;
@@ -82,7 +83,7 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
 
     public async Task<StoreHandle?> GetStoreAsync(string namespaceName, CancellationToken ct = default)
     {
-        if (_lifecycle.IsReleasing(namespaceName))
+        if (_stopping || _lifecycle.IsReleasing(namespaceName))
         {
             return null;
         }
@@ -90,7 +91,7 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
         var handle = _pool.Acquire(namespaceName);
         if (handle != null)
         {
-            if (_lifecycle.IsReleasing(namespaceName))
+            if (_stopping || _lifecycle.IsReleasing(namespaceName))
             {
                 handle.Dispose();
                 return null;
@@ -111,15 +112,15 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
             return null;
         }
 
-        await _namespaceLock.WaitAsync(ct);
+        var namespaceLock = GetNamespaceLock(namespaceName);
+        await namespaceLock.WaitAsync(ct);
         try
         {
-            var store = await OpenNamespaceUnderLockAsync(namespaceName, config.Backend, ct);
-            return store == null ? null : _pool.Acquire(namespaceName);
+            return await OpenNamespaceUnderLockAsync(namespaceName, config.Backend, ct);
         }
         finally
         {
-            _namespaceLock.Release();
+            namespaceLock.Release();
         }
     }
 
@@ -130,41 +131,46 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
             await _renewTimer.DisposeAsync();
         }
 
-        _namespaceLock.Dispose();
+        // In-flight requests can still hold or be waiting on a namespace lock while the
+        // host is draining. SemaphoreSlim has no unmanaged state, so let the coordinator
+        // and its lock dictionary be collected together instead of disposing locks here.
     }
 
-    internal async Task<SlateDbStore?> EnsureNamespaceOpenAsync(
+    internal async Task<bool> EnsureNamespaceOpenAsync(
         string namespaceName,
         string backend,
         CancellationToken ct = default)
     {
         if (_stopping)
         {
-            return null;
+            return false;
         }
 
-        await _namespaceLock.WaitAsync(ct);
+        var namespaceLock = GetNamespaceLock(namespaceName);
+        await namespaceLock.WaitAsync(ct);
         try
         {
-            return await OpenNamespaceUnderLockAsync(namespaceName, backend, ct);
+            using var handle = await OpenNamespaceUnderLockAsync(namespaceName, backend, ct);
+            return handle != null;
         }
         finally
         {
-            _namespaceLock.Release();
+            namespaceLock.Release();
         }
     }
 
     internal async Task ReleaseNamespaceAsync(string namespaceName)
     {
         IDisposable releasing;
-        await _namespaceLock.WaitAsync();
+        var namespaceLock = GetNamespaceLock(namespaceName);
+        await namespaceLock.WaitAsync();
         try
         {
             releasing = _lifecycle.EnterReleasing(namespaceName);
         }
         finally
         {
-            _namespaceLock.Release();
+            namespaceLock.Release();
         }
 
         try
@@ -191,7 +197,10 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
         await _pool.CloseAsync(namespaceName);
     }
 
-    private async Task<SlateDbStore?> OpenNamespaceUnderLockAsync(
+    private SemaphoreSlim GetNamespaceLock(string namespaceName)
+        => _namespaceLocks.GetOrAdd(namespaceName, _ => new SemaphoreSlim(1, 1));
+
+    private async Task<StoreHandle?> OpenNamespaceUnderLockAsync(
         string namespaceName,
         string backend,
         CancellationToken ct)
@@ -201,18 +210,29 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
             return null;
         }
 
-        if (!await AcquireLeaseIfNeededAsync(namespaceName, ct))
+        var (leaseAvailable, leaseAcquired) = await AcquireLeaseIfNeededAsync(namespaceName, ct);
+        if (!leaseAvailable)
         {
+            return null;
+        }
+
+        if (_stopping)
+        {
+            if (leaseAcquired)
+            {
+                await LeaseManager.ReleaseAsync(namespaceName);
+            }
+
             return null;
         }
 
         try
         {
             using var opening = _lifecycle.EnterOpening(namespaceName);
-            var store = await _pool.GetOrOpenAsync(namespaceName, backend);
+            var handle = await _pool.GetOrOpenHandleAsync(namespaceName, backend);
             _logger.LogInformation("Opened namespace {Namespace}", namespaceName);
 
-            return store;
+            return handle;
         }
         catch (Exception ex)
         {
@@ -221,29 +241,31 @@ public sealed class NamespaceCoordinator : IHostedService, IAsyncDisposable
 
             if (_clusterConfig.ClusterMode)
             {
-                await LeaseManager.ReleaseAsync(namespaceName, ct);
+                await LeaseManager.ReleaseAsync(namespaceName);
             }
 
             return null;
         }
     }
 
-    private async Task<bool> AcquireLeaseIfNeededAsync(string namespaceName, CancellationToken ct)
+    private async Task<(bool Available, bool Acquired)> AcquireLeaseIfNeededAsync(
+        string namespaceName,
+        CancellationToken ct)
     {
         if (!_clusterConfig.ClusterMode || LeaseManager.IsOwnedLocally(namespaceName))
         {
-            return true;
+            return (true, false);
         }
 
         if (!await LeaseManager.TryAcquireAsync(namespaceName, ct))
         {
             _logger.LogDebug("Failed to acquire lease for {Namespace} (already claimed)", namespaceName);
-            return false;
+            return (false, false);
         }
 
         _metrics.RecordLeaseAcquired();
         _logger.LogInformation("Lease acquired for namespace {Namespace}", namespaceName);
-        return true;
+        return (true, true);
     }
 
     private async Task RenewLeasesAsync()

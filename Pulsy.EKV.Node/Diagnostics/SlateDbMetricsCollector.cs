@@ -1,8 +1,8 @@
 using System.Diagnostics.Metrics;
-using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Pulsy.EKV.Node.Configuration;
 using Pulsy.EKV.Node.Storage.DatabasePool;
+using Pulsy.SlateDB.Metrics;
 
 namespace Pulsy.EKV.Node.Diagnostics;
 
@@ -14,6 +14,7 @@ public sealed class SlateDbMetricsCollector : IHostedService, IDisposable
     private readonly ILogger<SlateDbMetricsCollector> _logger;
     private readonly DiagnosticsConfig _diagnosticsConfig;
     private readonly Dictionary<string, long> _latest = new();
+    private readonly Dictionary<string, MetricSelector> _selectors = new();
     private readonly Lock _lock = new();
     private Timer? _timer;
 
@@ -30,38 +31,53 @@ public sealed class SlateDbMetricsCollector : IHostedService, IDisposable
         var meter = meterFactory.Create(MeterName);
 
         // Operations
-        RegisterGauge(meter, "slatedb.get_requests", "db/get_requests", "Total get requests");
-        RegisterGauge(meter, "slatedb.write_ops", "db/write_ops", "Total write operations");
-        RegisterGauge(meter, "slatedb.scan_requests", "db/scan_requests", "Total scan requests");
-        RegisterGauge(meter, "slatedb.write_batch_count", "db/write_batch_count", "Total write batches");
-        RegisterGauge(meter, "slatedb.flush_requests", "db/flush_requests", "Total flush requests");
+        RegisterGauge(
+            meter,
+            "slatedb.get_requests",
+            "slatedb.db.request_count",
+            "Total get requests",
+            new SlateDbMetricLabel("op", "get"));
+        RegisterGauge(meter, "slatedb.write_ops", "slatedb.db.write_ops", "Total write operations");
+        RegisterGauge(
+            meter,
+            "slatedb.scan_requests",
+            "slatedb.db.request_count",
+            "Total scan requests",
+            new SlateDbMetricLabel("op", "scan"));
+        RegisterGauge(meter, "slatedb.write_batch_count", "slatedb.db.write_batch_count", "Total write batches");
+        RegisterGauge(
+            meter,
+            "slatedb.flush_requests",
+            "slatedb.db.request_count",
+            "Total flush requests",
+            new SlateDbMetricLabel("op", "flush"));
 
         // Memory & SSTs
-        RegisterGauge(meter, "slatedb.total_mem_size_bytes", "db/total_mem_size_bytes", "Total memory usage");
-        RegisterGauge(meter, "slatedb.l0_sst_count", "db/l0_sst_count", "L0 SST file count");
+        RegisterGauge(meter, "slatedb.total_mem_size_bytes", "slatedb.db.total_mem_size_bytes", "Total memory usage");
+        RegisterGauge(meter, "slatedb.l0_sst_count", "slatedb.db.l0_sst_count", "L0 SST file count");
 
         // WAL
-        RegisterGauge(meter, "slatedb.wal_buffer_estimated_bytes", "db/wal_buffer_estimated_bytes", "WAL buffer size");
-        RegisterGauge(meter, "slatedb.wal_buffer_flushes", "db/wal_buffer_flushes", "WAL buffer flushes");
-        RegisterGauge(meter, "slatedb.immutable_memtable_flushes", "db/immutable_memtable_flushes", "Immutable memtable flushes");
-        RegisterGauge(meter, "slatedb.backpressure_count", "db/backpressure_count", "Backpressure events");
+        RegisterGauge(meter, "slatedb.wal_buffer_estimated_bytes", "slatedb.wal.wal_buffer_estimated_bytes", "WAL buffer size");
+        RegisterGauge(meter, "slatedb.wal_buffer_flushes", "slatedb.wal.wal_buffer_flushes", "WAL buffer flushes");
+        RegisterGauge(meter, "slatedb.immutable_memtable_flushes", "slatedb.db.immutable_memtable_flushes", "Immutable memtable flushes");
+        RegisterGauge(meter, "slatedb.backpressure_count", "slatedb.db.backpressure_count", "Backpressure events");
 
         // Bloom filter
-        RegisterGauge(meter, "slatedb.sst_filter_false_positives", "db/sst_filter_false_positives", "Bloom filter false positives");
-        RegisterGauge(meter, "slatedb.sst_filter_positives", "db/sst_filter_positives", "Bloom filter positives");
-        RegisterGauge(meter, "slatedb.sst_filter_negatives", "db/sst_filter_negatives", "Bloom filter negatives");
+        RegisterGauge(meter, "slatedb.sst_filter_false_positives", "slatedb.db.sst_filter_false_positive_count", "Bloom filter false positives");
+        RegisterGauge(meter, "slatedb.sst_filter_positives", "slatedb.db.sst_filter_positive_count", "Bloom filter positives");
+        RegisterGauge(meter, "slatedb.sst_filter_negatives", "slatedb.db.sst_filter_negative_count", "Bloom filter negatives");
 
         // Block cache
-        RegisterGauge(meter, "slatedb.cache_index_hit", "dbcache/index_hit", "Block cache index hits");
-        RegisterGauge(meter, "slatedb.cache_index_miss", "dbcache/index_miss", "Block cache index misses");
-        RegisterGauge(meter, "slatedb.cache_data_block_hit", "dbcache/data_block_hit", "Block cache data hits");
-        RegisterGauge(meter, "slatedb.cache_data_block_miss", "dbcache/data_block_miss", "Block cache data misses");
-        RegisterGauge(meter, "slatedb.cache_filter_hit", "dbcache/filter_hit", "Block cache filter hits");
-        RegisterGauge(meter, "slatedb.cache_filter_miss", "dbcache/filter_miss", "Block cache filter misses");
+        RegisterCacheGauge(meter, "slatedb.cache_index_hit", "index", "hit", "Block cache index hits");
+        RegisterCacheGauge(meter, "slatedb.cache_index_miss", "index", "miss", "Block cache index misses");
+        RegisterCacheGauge(meter, "slatedb.cache_data_block_hit", "data_block", "hit", "Block cache data hits");
+        RegisterCacheGauge(meter, "slatedb.cache_data_block_miss", "data_block", "miss", "Block cache data misses");
+        RegisterCacheGauge(meter, "slatedb.cache_filter_hit", "filter", "hit", "Block cache filter hits");
+        RegisterCacheGauge(meter, "slatedb.cache_filter_miss", "filter", "miss", "Block cache filter misses");
 
         // Compactor
-        RegisterGauge(meter, "slatedb.compactor_bytes_compacted", "compactor/bytes_compacted", "Total bytes compacted");
-        RegisterGauge(meter, "slatedb.compactor_running", "compactor/running_compactions", "Running compactions");
+        RegisterGauge(meter, "slatedb.compactor_bytes_compacted", "slatedb.compactor.bytes_compacted", "Total bytes compacted");
+        RegisterGauge(meter, "slatedb.compactor_running", "slatedb.compactor.running_compactions", "Running compactions");
     }
 
     public Task StartAsync(CancellationToken ct)
@@ -79,19 +95,73 @@ public sealed class SlateDbMetricsCollector : IHostedService, IDisposable
 
     public void Dispose() => _timer?.Dispose();
 
-    private void RegisterGauge(Meter meter, string instrumentName, string jsonKey, string description)
+    private static bool TryGetValue(SlateDbMetricValue metric, out long value)
     {
+        switch (metric)
+        {
+            case SlateDbCounterMetricValue counter:
+                value = counter.Value > long.MaxValue ? long.MaxValue : (long)counter.Value;
+                return true;
+            case SlateDbGaugeMetricValue gauge:
+                value = gauge.Value;
+                return true;
+            case SlateDbUpDownCounterMetricValue counter:
+                value = counter.Value;
+                return true;
+            default:
+                value = 0;
+                return false;
+        }
+    }
+
+    private static long AddSaturating(long left, long right)
+    {
+        if (right > 0 && left > long.MaxValue - right)
+        {
+            return long.MaxValue;
+        }
+
+        if (right < 0 && left < long.MinValue - right)
+        {
+            return long.MinValue;
+        }
+
+        return left + right;
+    }
+
+    private void RegisterGauge(
+        Meter meter,
+        string instrumentName,
+        string metricName,
+        string description,
+        params SlateDbMetricLabel[] labels)
+    {
+        _selectors[instrumentName] = new MetricSelector(metricName, labels);
         meter.CreateObservableGauge(
             instrumentName,
             () =>
             {
                 lock (_lock)
                 {
-                    return _latest.GetValueOrDefault(jsonKey, 0);
+                    return _latest.GetValueOrDefault(instrumentName, 0);
                 }
             },
             description: description);
     }
+
+    private void RegisterCacheGauge(
+        Meter meter,
+        string instrumentName,
+        string entryKind,
+        string result,
+        string description)
+        => RegisterGauge(
+            meter,
+            instrumentName,
+            "slatedb.db_cache.access_count",
+            description,
+            new SlateDbMetricLabel("entry_kind", entryKind),
+            new SlateDbMetricLabel("result", result));
 
     private void Collect(object? state)
     {
@@ -104,16 +174,17 @@ public sealed class SlateDbMetricsCollector : IHostedService, IDisposable
             {
                 try
                 {
-                    var json = store.Metrics();
-                    var metrics = JsonSerializer.Deserialize<Dictionary<string, long>>(json);
-                    if (metrics == null)
+                    foreach (var metric in store.Metrics())
                     {
-                        continue;
-                    }
-
-                    foreach (var (key, value) in metrics)
-                    {
-                        aggregated[key] = aggregated.GetValueOrDefault(key) + value;
+                        foreach (var (instrumentName, selector) in _selectors)
+                        {
+                            if (selector.Matches(metric) && TryGetValue(metric.Value, out var value))
+                            {
+                                aggregated[instrumentName] = AddSaturating(
+                                    aggregated.GetValueOrDefault(instrumentName),
+                                    value);
+                            }
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -135,5 +206,11 @@ public sealed class SlateDbMetricsCollector : IHostedService, IDisposable
         {
             _logger.LogDebug(ex, "Error collecting SlateDB metrics");
         }
+    }
+
+    private sealed record MetricSelector(string Name, IReadOnlyList<SlateDbMetricLabel> Labels)
+    {
+        public bool Matches(SlateDbMetric metric)
+            => metric.Name == Name && Labels.All(metric.Labels.Contains);
     }
 }

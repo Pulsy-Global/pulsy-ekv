@@ -20,6 +20,7 @@
     <ItemGroup>
         <ProjectReference Include="..\..\Pulsy.EKV.Node\Pulsy.EKV.Node.csproj" />
         <ProjectReference Include="..\..\Pulsy.EKV.Client\Pulsy.EKV.Client.csproj" />
+        <PackageReference Include="Pulsy.SlateDB" />
     </ItemGroup>
 
 </Project>

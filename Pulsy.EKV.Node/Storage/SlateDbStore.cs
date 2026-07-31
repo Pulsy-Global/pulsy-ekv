@@ -2,6 +2,7 @@ using System.Text;
 using Pulsy.EKV.Grpc;
 using Pulsy.EKV.Node.Models;
 using Pulsy.SlateDB;
+using Pulsy.SlateDB.Metrics;
 using Pulsy.SlateDB.Options;
 
 namespace Pulsy.EKV.Node.Storage;
@@ -72,7 +73,7 @@ public sealed class SlateDbStore : IDisposable
 
     public StringKeyIterator CreateScanIterator(string? startKey, string? endKey) => new(_db.Scan(startKey, endKey));
 
-    public string Metrics() => _db.Metrics();
+    public IReadOnlyList<SlateDbMetric> Metrics() => _db.GetMetrics();
 
     public void Flush() => _db.Flush();
 
